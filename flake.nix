@@ -17,7 +17,17 @@
         pkgs:
         let
           pythonEnv = pkgs.python312.withPackages (ps: [
+            ps.asn1crypto
+            ps.cached-property
+            ps.cffi
+            ps.cryptography
+            ps.iniconfig
+            ps.packaging
+            ps.pluggy
             ps.pykcs11
+            ps.pycparser
+            ps.python-pkcs11
+            ps.pytest
           ]);
         in
         {

@@ -27,13 +27,14 @@
 
 #include "gck-rpc-conf.h"
 #include "gck-rpc-layer.h"
-#include "gck-rpc-tls-psk.h"
+#include "gck-rpc-tls.h"
 
 #include <stdio.h>
 #include <errno.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <signal.h>
 
 #include <dlfcn.h>
@@ -112,10 +113,12 @@ static int install_syscall_filter(const int sock, const char *tls_psk_keyfile, c
 	seccomp_rule_add(ctx,SCMP_ACT_ALLOW, SCMP_SYS(munlock), 0);
 
 	/*
-	 * Both pthreads (? file is "/sys/devices/system/cpu/online") and TLS-PSK open files.
+	 * Both pthreads (? file is "/sys/devices/system/cpu/online") and TLS open files.
 	 */
 	seccomp_rule_add(ctx,SCMP_ACT_ALLOW, SCMP_SYS(open), 1,
 			 SCMP_A1(SCMP_CMP_EQ, O_RDONLY | O_CLOEXEC));
+	seccomp_rule_add(ctx,SCMP_ACT_ALLOW, SCMP_SYS(open), 1,
+			 SCMP_A1(SCMP_CMP_EQ, O_RDONLY));
 
 	seccomp_rule_add(ctx,SCMP_ACT_ALLOW, SCMP_SYS(close), 0);
 
@@ -212,11 +215,14 @@ int main(int argc, char *argv[])
 	CK_FUNCTION_LIST_PTR funcs;
 	void *module;
 	const char *path, *tls_psk_keyfile;
+	const char *tls_cert_file, *tls_key_file, *tls_ca_file, *tls_ca_path, *tls_crl_file;
+	const char *tls_mode;
+	bool tls_verify_peer;
 	fd_set read_fds;
 	int sock, ret, mode;
 	CK_RV rv;
 	CK_C_INITIALIZE_ARGS init_args;
-	GckRpcTlsPskCtx *tls_ctx;
+	GckRpcTlsCtx *tls_ctx;
 
 	/* The module to load is the argument */
 	if (argc != 2 && argc != 3)
@@ -279,22 +285,63 @@ int main(int argc, char *argv[])
 	/* Initialize TLS, if appropriate */
 	tls_ctx = NULL;
 	tls_psk_keyfile = NULL;
+	tls_cert_file = NULL;
+	tls_key_file = NULL;
+	tls_ca_file = NULL;
+	tls_ca_path = NULL;
+	tls_crl_file = NULL;
+	tls_verify_peer = gck_rpc_conf_get_tls_verify_peer("PKCS11_PROXY_TLS_VERIFY_PEER");
+	tls_mode = gck_rpc_conf_get_tls_mode("PKCS11_PROXY_TLS_MODE");
 	if (! strncmp("tls://", path, 6)) {
-		tls_psk_keyfile = gck_rpc_conf_get_tls_psk_file("PKCS11_PROXY_TLS_PSK_FILE");
-		if (! tls_psk_keyfile || ! tls_psk_keyfile[0]) {
-			fprintf(stderr, "key file must be specified for tls:// socket.\n");
-			exit(1);
+		enum gck_rpc_tls_mode mode = GCK_RPC_TLS_MODE_PSK;
+
+		tls_cert_file = gck_rpc_conf_get_tls_cert_file("PKCS11_PROXY_TLS_CERT_FILE");
+		tls_key_file = gck_rpc_conf_get_tls_key_file("PKCS11_PROXY_TLS_KEY_FILE");
+		tls_ca_file = gck_rpc_conf_get_tls_ca_file("PKCS11_PROXY_TLS_CA_FILE");
+		tls_ca_path = gck_rpc_conf_get_tls_ca_path("PKCS11_PROXY_TLS_CA_PATH");
+		tls_crl_file = gck_rpc_conf_get_tls_crl_file("PKCS11_PROXY_TLS_CRL_FILE");
+
+		if (tls_mode) {
+			if (strcasecmp(tls_mode, "cert") == 0 || strcasecmp(tls_mode, "mtls") == 0)
+				mode = GCK_RPC_TLS_MODE_CERT;
+			else if (strcasecmp(tls_mode, "psk") == 0)
+				mode = GCK_RPC_TLS_MODE_PSK;
+		} else if ((tls_cert_file && tls_cert_file[0]) ||
+			   (tls_key_file && tls_key_file[0]) ||
+			   (tls_ca_file && tls_ca_file[0]) ||
+			   (tls_ca_path && tls_ca_path[0])) {
+			mode = GCK_RPC_TLS_MODE_CERT;
 		}
 
-		tls_ctx = calloc(1, sizeof(GckRpcTlsPskCtx));
+		tls_ctx = calloc(1, sizeof(GckRpcTlsCtx));
 		if (tls_ctx == NULL) {
-			fprintf(stderr, "can't allocate memory for TLS-PSK context");
+			fprintf(stderr, "can't allocate memory for TLS context");
 			exit(1);
 		}
 
-		if (!gck_rpc_init_tls_psk(tls_ctx, tls_psk_keyfile, NULL, GCK_RPC_TLS_PSK_SERVER)) {
-			fprintf(stderr, "TLS-PSK initialization failed");
-			exit(1);
+		if (mode == GCK_RPC_TLS_MODE_PSK) {
+			tls_psk_keyfile = gck_rpc_conf_get_tls_psk_file("PKCS11_PROXY_TLS_PSK_FILE");
+			if (! tls_psk_keyfile || ! tls_psk_keyfile[0]) {
+				fprintf(stderr, "PSK key file must be specified for tls:// socket.\n");
+				exit(1);
+			}
+
+			if (!gck_rpc_init_tls_psk(tls_ctx, tls_psk_keyfile, NULL, GCK_RPC_TLS_SERVER)) {
+				fprintf(stderr, "TLS-PSK initialization failed");
+				exit(1);
+			}
+		} else {
+			if (! tls_cert_file || ! tls_cert_file[0] || ! tls_key_file || ! tls_key_file[0]) {
+				fprintf(stderr, "TLS cert and key files must be specified for tls:// socket.\n");
+				exit(1);
+			}
+
+			if (!gck_rpc_init_tls_cert(tls_ctx, tls_cert_file, tls_key_file,
+						   tls_ca_file, tls_ca_path, tls_crl_file,
+						   tls_verify_peer, GCK_RPC_TLS_SERVER)) {
+				fprintf(stderr, "TLS-CERT initialization failed");
+				exit(1);
+			}
 		}
 	}
 

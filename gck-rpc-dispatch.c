@@ -25,7 +25,7 @@
 
 #include "gck-rpc-layer.h"
 #include "gck-rpc-private.h"
-#include "gck-rpc-tls-psk.h"
+#include "gck-rpc-tls.h"
 
 #include "pkcs11/pkcs11.h"
 #include "pkcs11/pkcs11g.h"
@@ -101,7 +101,7 @@ struct _CallState {
 	 * upper limit and reduce typical memory use.
 	 */
 	SessionState sessions[PKCS11PROXY_MAX_SESSION_COUNT];
-	GckRpcTlsPskState *tls;
+	GckRpcTlsState *tls;
 };
 
 typedef struct _DispatchState {
@@ -2379,14 +2379,14 @@ static void gck_rpc_free_ds(DispatchState *ds)
 	free(ds);
 }
 
-void gck_rpc_layer_accept(GckRpcTlsPskCtx *tls_ctx)
+void gck_rpc_layer_accept(GckRpcTlsCtx *tls_ctx)
 {
 	struct sockaddr_storage addr;
 	DispatchState *ds, **here;
 	int error;
 	socklen_t addrlen;
 	int new_fd;
-	GckRpcTlsPskState *tls = NULL;
+	GckRpcTlsState *tls = NULL;
 
 	assert(pkcs11_socket != -1);
 
@@ -2419,7 +2419,7 @@ void gck_rpc_layer_accept(GckRpcTlsPskCtx *tls_ctx)
 	}
 
 	if (tls_ctx != NULL) {
-		tls = calloc(1, sizeof(GckRpcTlsPskState));
+		tls = calloc(1, sizeof(GckRpcTlsState));
 		tls->ctx = tls_ctx;
 	}
 
@@ -2734,7 +2734,7 @@ static int _install_dispatch_syscall_filter(int use_tls)
 	seccomp_rule_add(ctx,SCMP_ACT_ALLOW, SCMP_SYS(recvfrom), 0);
 
 	/*
-	 * TLS-PSK
+	 * TLS
 	 */
 	if (use_tls)
 		/* Allow open() of the TLS-PSK keyfile. */

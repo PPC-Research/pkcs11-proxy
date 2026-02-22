@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # set base directory
 if readlink ${BASH_SOURCE[0]} > /dev/null; then
@@ -22,6 +22,15 @@ default_paths=(
     "/usr/local/lib/softhsm/libsofthsm2.so"
     "/usr/lib/softhsm/libsofthsm2.so"
 )
+
+softhsm2_util_path="$(command -v softhsm2-util 2>/dev/null || true)"
+if [ -n "$softhsm2_util_path" ]; then
+    softhsm_prefix="$(dirname "$(dirname "$softhsm2_util_path")")"
+    default_paths+=(
+        "$softhsm_prefix/lib/softhsm/libsofthsm2.so"
+        "$softhsm_prefix/lib/softhsm2/libsofthsm2.so"
+    )
+fi
 
 PKCS11_MODULE=""
 for path in "${default_paths[@]}"; do

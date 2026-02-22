@@ -27,7 +27,7 @@ set(PKCS11_PROXY_SRCS
     gck-rpc-message.c
     gck-rpc-util.c
     egg-buffer.c
-    gck-rpc-tls-psk.c
+    gck-rpc-tls.c
 )
 
 set(PKCS11_DAEMON_SRCS
@@ -39,7 +39,7 @@ set(PKCS11_DAEMON_SRCS
     gck-rpc-util.c
     syscall-reporter.c
     syscall-names.h
-    gck-rpc-tls-psk.c
+    gck-rpc-tls.c
 )
 
 # Compiler flags
