@@ -1,0 +1,38 @@
+Below are the findings ordered by severity, with file/line refs.
+
+  Findings
+
+  - Critical: TLS client does not perform hostname verification or set SNI, so any valid CA-signed cert
+    for a different host will be accepted. gck-rpc-tls.c:389 only enables SSL_VERIFY_PEER without host
+    checks, and gck-rpc-module.c:513 parses host but never passes it to OpenSSL. Add
+    SSL_set_tlsext_host_name + X509_VERIFY_PARAM_set1_host (or set1_ip_asc for IP literals) on the
+    client before SSL_connect.
+  - High: TLS enforcement can silently downgrade to plaintext if calloc for per-connection TLS state
+    fails. gck-rpc-dispatch.c:2421 allocates tls without a NULL check and proceeds with tls == NULL, so
+    a tls:// listener could accept non‑TLS connections. Fail the accept if TLS is required or propagate
+    error.
+  - High: TLS connection failure leaks resources and may leak the socket. In gck-rpc-module.c:530–570,
+    errors return without freeing tls_ctx / cs->tls or closing sock. Then call_lookup frees cs directly
+    (gck-rpc-module.c:659–662), bypassing call_destroy, so the leaks persist.
+  - Medium: PSK client identity auto-detection uses the full line identity:hexkey as the identity. gck-
+    rpc-tls.c:320–341 never splits at : so the server lookup won’t match unless the identity equals the
+    entire line. Parse the identity part before : and trim whitespace.
+  - Medium: gck_rpc_set_string truncates all config strings to 255 bytes regardless of the destination
+    buffer size. gck-rpc-conf.c:74–78 makes long so_path, cert, or key paths silently invalid. Pass
+    buffer size or use a size-aware helper per field.
+  - Medium: TLS read/write helpers treat SSL_ERROR_WANT_READ/WRITE as hard failures. gck-rpc-tls.c:517–
+    542 and gck-rpc-tls.c:558–582 return -1 without retrying or signalling the caller to retry. This can cause sporadic failures under renegotiation or partial I/O.
+  - Low: parse_argument can dereference a NULL value when a key is specified without :/=. gck-rpc-
+    module.c:124–142 pass value to snprintf even if it’s NULL. Guard against missing values or emit a
+    warning.
+
+  Open questions / assumptions
+
+  - Are tls:// endpoints expected to always use mTLS with hostname verification? If not, do you want a
+    config toggle for hostname checking or default‑on with opt‑out?
+  - Should PKCS11_PROXY_CONF_PATH be treated as mandatory if set? Right now missing/unreadable config
+    still returns success (gck-rpc-conf.c:173–185).
+
+  Change summary
+
+  - New TLS/mTLS support and config parsing are in place, but several error paths and verification steps are incomplete, and there are silent downgrade/cleanup risks that should be addressed before relying on TLS in production.
