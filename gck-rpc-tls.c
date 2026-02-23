@@ -593,32 +593,35 @@ gck_rpc_tls_write_all(GckRpcTlsState *state, void *data, unsigned int len)
 	int ret, ssl_err;
 	char buf[1024];
 
-	ret = SSL_write(state->ssl, data, len);
-	if (ret > 0)
-		return ret;
+	for (;;) {
+		ret = SSL_write(state->ssl, data, len);
+		if (ret > 0)
+			return ret;
 
-	ssl_err = SSL_get_error(state->ssl, ret);
-	switch (ssl_err) {
-	case SSL_ERROR_WANT_READ:
-	case SSL_ERROR_WANT_WRITE:
-		break;
-	case SSL_ERROR_ZERO_RETURN:
-		warning(("SSL_write: connection closed"));
-		break;
-	case SSL_ERROR_SYSCALL:
-		if (ret == 0) {
-			warning(("SSL_write: syscall EOF"));
-		} else {
-			if (errno == EPIPE || errno == ECONNRESET)
-				break;
-			perror("SSL_write: syscall error");
-		}
-		break;
-	default:
-		/* Print all queued OpenSSL errors */
-		while ((ssl_err = ERR_get_error())) {
-			ERR_error_string_n(ssl_err, buf, sizeof(buf));
-			warning(("SSL_write error: %s", buf));
+		ssl_err = SSL_get_error(state->ssl, ret);
+		switch (ssl_err) {
+		case SSL_ERROR_WANT_READ:
+		case SSL_ERROR_WANT_WRITE:
+			continue;
+		case SSL_ERROR_ZERO_RETURN:
+			warning(("SSL_write: connection closed"));
+			break;
+		case SSL_ERROR_SYSCALL:
+			if (ret == 0) {
+				warning(("SSL_write: syscall EOF"));
+			} else {
+				if (errno == EPIPE || errno == ECONNRESET)
+					break;
+				perror("SSL_write: syscall error");
+			}
+			break;
+		default:
+			/* Print all queued OpenSSL errors */
+			while ((ssl_err = ERR_get_error())) {
+				ERR_error_string_n(ssl_err, buf, sizeof(buf));
+				warning(("SSL_write error: %s", buf));
+			}
+			break;
 		}
 		break;
 	}
@@ -634,30 +637,33 @@ gck_rpc_tls_read_all(GckRpcTlsState *state, void *data, unsigned int len)
 	int ret, ssl_err;
 	char buf[1024];
 
-	ret = SSL_read(state->ssl, data, len);
-	if (ret > 0)
-		return ret;
+	for (;;) {
+		ret = SSL_read(state->ssl, data, len);
+		if (ret > 0)
+			return ret;
 
-	ssl_err = SSL_get_error(state->ssl, ret);
-	switch (ssl_err) {
-	case SSL_ERROR_WANT_READ:
-	case SSL_ERROR_WANT_WRITE:
-		break;
-	case SSL_ERROR_ZERO_RETURN:
-		warning(("SSL_read: connection closed"));
-		break;
-	case SSL_ERROR_SYSCALL:
-		if (ret == 0) {
-			warning(("SSL_read: syscall EOF"));
-		} else {
-			perror("SSL_read: syscall error");
-		}
-		break;
-	default:
-		/* Print all queued OpenSSL errors */
-		while ((ssl_err = ERR_get_error())) {
-			ERR_error_string_n(ssl_err, buf, sizeof(buf));
-			warning(("SSL_read error: %s", buf));
+		ssl_err = SSL_get_error(state->ssl, ret);
+		switch (ssl_err) {
+		case SSL_ERROR_WANT_READ:
+		case SSL_ERROR_WANT_WRITE:
+			continue;
+		case SSL_ERROR_ZERO_RETURN:
+			warning(("SSL_read: connection closed"));
+			break;
+		case SSL_ERROR_SYSCALL:
+			if (ret == 0) {
+				warning(("SSL_read: syscall EOF"));
+			} else {
+				perror("SSL_read: syscall error");
+			}
+			break;
+		default:
+			/* Print all queued OpenSSL errors */
+			while ((ssl_err = ERR_get_error())) {
+				ERR_error_string_n(ssl_err, buf, sizeof(buf));
+				warning(("SSL_read error: %s", buf));
+			}
+			break;
 		}
 		break;
 	}

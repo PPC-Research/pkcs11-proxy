@@ -121,6 +121,11 @@ static void parse_argument(char *arg)
 	else
 		*(value++) = 0;
 
+	if (value == NULL) {
+		warning(("missing value for argument: %s", arg));
+		return;
+	}
+
 	/* Setup the socket path from the arguments */
 	if (strcmp(arg, "socket") == 0)
 		snprintf(pkcs11_socket_path, sizeof(pkcs11_socket_path), "%s",
@@ -141,10 +146,8 @@ static void parse_argument(char *arg)
 	else if (strcmp(arg, "tls_mode") == 0)
 		snprintf(tls_mode_name, sizeof(tls_mode_name), "%s", value);
 	else if (strcmp(arg, "tls_verify_peer") == 0) {
-		if (value) {
-			tls_verify_peer = (strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0);
-			tls_verify_peer_set = 1;
-		}
+		tls_verify_peer = (strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0);
+		tls_verify_peer_set = 1;
 	}
 	else
 		warning(("unrecognized argument: %s", arg));
