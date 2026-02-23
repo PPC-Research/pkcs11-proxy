@@ -26,7 +26,7 @@
 #include "gck-rpc-conf.h"
 #include "gck-rpc-layer.h"
 #include "gck-rpc-private.h"
-#include "gck-rpc-tls-psk.h"
+#include "gck-rpc-tls.h"
 
 #include "pkcs11/pkcs11.h"
 
@@ -54,6 +54,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 /* -------------------------------------------------------------------
  * GLOBALS / DEFINES
@@ -69,8 +70,16 @@ static uint64_t pkcs11_app_id = 0;
 
 /* The socket to connect to */
 static char pkcs11_socket_path[MAXPATHLEN] = { 0, };
-/* The TLS-PSK keyfile name */
+/* TLS configuration */
 static char tls_psk_key_filename[MAXPATHLEN] = { 0, };
+static char tls_cert_file[MAXPATHLEN] = { 0, };
+static char tls_key_file[MAXPATHLEN] = { 0, };
+static char tls_ca_file[MAXPATHLEN] = { 0, };
+static char tls_ca_path[MAXPATHLEN] = { 0, };
+static char tls_crl_file[MAXPATHLEN] = { 0, };
+static char tls_mode_name[16] = { 0, };
+static int tls_verify_peer_set = 0;
+static bool tls_verify_peer = true;
 
 /* The error used by us when parsing of rpc message fails */
 #define PARSE_ERROR   CKR_DEVICE_ERROR
@@ -119,6 +128,24 @@ static void parse_argument(char *arg)
 	else if (strcmp(arg, "tls_psk_file") == 0)
 		snprintf(tls_psk_key_filename, sizeof(tls_psk_key_filename), "%s",
 			 value);
+	else if (strcmp(arg, "tls_cert_file") == 0)
+		snprintf(tls_cert_file, sizeof(tls_cert_file), "%s", value);
+	else if (strcmp(arg, "tls_key_file") == 0)
+		snprintf(tls_key_file, sizeof(tls_key_file), "%s", value);
+	else if (strcmp(arg, "tls_ca_file") == 0)
+		snprintf(tls_ca_file, sizeof(tls_ca_file), "%s", value);
+	else if (strcmp(arg, "tls_ca_path") == 0)
+		snprintf(tls_ca_path, sizeof(tls_ca_path), "%s", value);
+	else if (strcmp(arg, "tls_crl_file") == 0)
+		snprintf(tls_crl_file, sizeof(tls_crl_file), "%s", value);
+	else if (strcmp(arg, "tls_mode") == 0)
+		snprintf(tls_mode_name, sizeof(tls_mode_name), "%s", value);
+	else if (strcmp(arg, "tls_verify_peer") == 0) {
+		if (value) {
+			tls_verify_peer = (strcasecmp(value, "true") == 0 || strcmp(value, "1") == 0);
+			tls_verify_peer_set = 1;
+		}
+	}
 	else
 		warning(("unrecognized argument: %s", arg));
 }
@@ -190,6 +217,72 @@ done:
 	free(dup);
 }
 
+static const char *get_tls_mode_string(void)
+{
+	if (tls_mode_name[0])
+		return tls_mode_name;
+	return gck_rpc_conf_get_tls_mode("PKCS11_PROXY_TLS_MODE");
+}
+
+static enum gck_rpc_tls_mode resolve_tls_mode(void)
+{
+	const char *mode = get_tls_mode_string();
+
+	if (mode) {
+		if (strcasecmp(mode, "cert") == 0 || strcasecmp(mode, "mtls") == 0)
+			return GCK_RPC_TLS_MODE_CERT;
+		if (strcasecmp(mode, "psk") == 0)
+			return GCK_RPC_TLS_MODE_PSK;
+	}
+
+	if (tls_cert_file[0] || tls_key_file[0] || tls_ca_file[0] || tls_ca_path[0])
+		return GCK_RPC_TLS_MODE_CERT;
+
+	return GCK_RPC_TLS_MODE_PSK;
+}
+
+static const char *get_tls_cert_file(void)
+{
+	if (tls_cert_file[0])
+		return tls_cert_file;
+	return gck_rpc_conf_get_tls_cert_file("PKCS11_PROXY_TLS_CERT_FILE");
+}
+
+static const char *get_tls_key_file(void)
+{
+	if (tls_key_file[0])
+		return tls_key_file;
+	return gck_rpc_conf_get_tls_key_file("PKCS11_PROXY_TLS_KEY_FILE");
+}
+
+static const char *get_tls_ca_file(void)
+{
+	if (tls_ca_file[0])
+		return tls_ca_file;
+	return gck_rpc_conf_get_tls_ca_file("PKCS11_PROXY_TLS_CA_FILE");
+}
+
+static const char *get_tls_ca_path(void)
+{
+	if (tls_ca_path[0])
+		return tls_ca_path;
+	return gck_rpc_conf_get_tls_ca_path("PKCS11_PROXY_TLS_CA_PATH");
+}
+
+static const char *get_tls_crl_file(void)
+{
+	if (tls_crl_file[0])
+		return tls_crl_file;
+	return gck_rpc_conf_get_tls_crl_file("PKCS11_PROXY_TLS_CRL_FILE");
+}
+
+static bool get_tls_verify_peer(void)
+{
+	if (tls_verify_peer_set)
+		return tls_verify_peer;
+	return gck_rpc_conf_get_tls_verify_peer("PKCS11_PROXY_TLS_VERIFY_PEER");
+}
+
 /* -----------------------------------------------------------------------------
  * CALL SESSION
  */
@@ -207,7 +300,7 @@ typedef struct _CallState {
 	GckRpcMessage *req;	/* The current request */
 	GckRpcMessage *resp;	/* The current response */
 	int call_status;
-	GckRpcTlsPskState *tls;
+	GckRpcTlsState *tls;
 	struct _CallState *next;	/* For pooling of completed sockets */
 } CallState;
 
@@ -265,7 +358,6 @@ static CK_RV call_write(CallState * cs, unsigned char *data, size_t len)
 
 		if (r == -1) {
 			if (errno == EPIPE) {
-				warning(("couldn't send data: daemon closed connection"));
 				call_disconnect(cs);
 				return CKR_DEVICE_ERROR;
 			} else if (errno != EAGAIN && errno != EINTR) {
@@ -436,22 +528,40 @@ static CK_RV call_connect(CallState * cs)
 		free(host);
 
 		if (! strncmp("tls://", pkcs11_socket_path, 6)) {
-			GckRpcTlsPskCtx *tls_ctx = calloc(1, sizeof(GckRpcTlsPskCtx));
+			enum gck_rpc_tls_mode mode = resolve_tls_mode();
+			GckRpcTlsCtx *tls_ctx = calloc(1, sizeof(GckRpcTlsCtx));
 			if (tls_ctx == NULL) {
-				warning(("can't allocate memory for TLS-PSK context"));
+				warning(("can't allocate memory for TLS context"));
 				return CKR_HOST_MEMORY;
 			}
 
-			cs->tls = calloc(1, sizeof(GckRpcTlsPskState));
+			cs->tls = calloc(1, sizeof(GckRpcTlsState));
 			if (cs->tls == NULL) {
-				warning(("can't allocate memory for TLS-PSK"));
+				warning(("can't allocate memory for TLS state"));
 				return CKR_HOST_MEMORY;
 			}
 
-			if (!gck_rpc_init_tls_psk(tls_ctx, tls_psk_key_filename, NULL, GCK_RPC_TLS_PSK_CLIENT)) {
-				warning(("TLS-PSK initialization failed"));
-				return CKR_DEVICE_ERROR;
+			if (mode == GCK_RPC_TLS_MODE_PSK) {
+				if (!gck_rpc_init_tls_psk(tls_ctx, tls_psk_key_filename, NULL, GCK_RPC_TLS_CLIENT)) {
+					warning(("TLS-PSK initialization failed"));
+					return CKR_DEVICE_ERROR;
+				}
+			} else {
+				const char *cert_file = get_tls_cert_file();
+				const char *key_file = get_tls_key_file();
+				const char *ca_file = get_tls_ca_file();
+				const char *ca_path = get_tls_ca_path();
+				const char *crl_file = get_tls_crl_file();
+				bool verify_peer = get_tls_verify_peer();
+
+				if (!gck_rpc_init_tls_cert(tls_ctx, cert_file, key_file, ca_file,
+							   ca_path, crl_file, verify_peer,
+							   GCK_RPC_TLS_CLIENT)) {
+					warning(("TLS-CERT initialization failed"));
+					return CKR_DEVICE_ERROR;
+				}
 			}
+
 			cs->tls->ctx = tls_ctx;
 
 			if (! gck_rpc_start_tls(cs->tls, sock)) {
@@ -1402,20 +1512,58 @@ static CK_RV rpc_C_Initialize(CK_VOID_PTR init_args)
 		}
 	}
 
-	/* If socket path indicates TLS, make sure tls_psk_key_filename is populated. */
+	/* If socket path indicates TLS, validate TLS configuration. */
 	if (! strncmp("tls://", pkcs11_socket_path, 6)) {
-		if (! tls_psk_key_filename[0]) {
-			path = gck_rpc_conf_get_tls_psk_file("PKCS11_PROXY_TLS_PSK_FILE");
-			if (path && path[0]) {
-				snprintf(tls_psk_key_filename, sizeof(tls_psk_key_filename),
-					 "%s", path);
-			}
-		}
+		enum gck_rpc_tls_mode mode = resolve_tls_mode();
 
-		if (! tls_psk_key_filename[0]) {
-			warning(("can't handle tls:// path without a tls-psk file"));
-			ret =  CKR_FUNCTION_NOT_SUPPORTED;
-			goto done;
+		if (mode == GCK_RPC_TLS_MODE_PSK) {
+			if (! tls_psk_key_filename[0]) {
+				path = gck_rpc_conf_get_tls_psk_file("PKCS11_PROXY_TLS_PSK_FILE");
+				if (path && path[0]) {
+					snprintf(tls_psk_key_filename, sizeof(tls_psk_key_filename),
+						 "%s", path);
+				}
+			}
+
+			if (! tls_psk_key_filename[0]) {
+				warning(("can't handle tls:// path without a tls-psk file"));
+				ret =  CKR_FUNCTION_NOT_SUPPORTED;
+				goto done;
+			}
+		} else {
+			if (! tls_cert_file[0]) {
+				path = gck_rpc_conf_get_tls_cert_file("PKCS11_PROXY_TLS_CERT_FILE");
+				if (path && path[0])
+					snprintf(tls_cert_file, sizeof(tls_cert_file), "%s", path);
+			}
+			if (! tls_key_file[0]) {
+				path = gck_rpc_conf_get_tls_key_file("PKCS11_PROXY_TLS_KEY_FILE");
+				if (path && path[0])
+					snprintf(tls_key_file, sizeof(tls_key_file), "%s", path);
+			}
+			if (! tls_ca_file[0]) {
+				path = gck_rpc_conf_get_tls_ca_file("PKCS11_PROXY_TLS_CA_FILE");
+				if (path && path[0])
+					snprintf(tls_ca_file, sizeof(tls_ca_file), "%s", path);
+			}
+			if (! tls_ca_path[0]) {
+				path = gck_rpc_conf_get_tls_ca_path("PKCS11_PROXY_TLS_CA_PATH");
+				if (path && path[0])
+					snprintf(tls_ca_path, sizeof(tls_ca_path), "%s", path);
+			}
+			if (! tls_crl_file[0]) {
+				path = gck_rpc_conf_get_tls_crl_file("PKCS11_PROXY_TLS_CRL_FILE");
+				if (path && path[0])
+					snprintf(tls_crl_file, sizeof(tls_crl_file), "%s", path);
+			}
+			if (! tls_verify_peer_set)
+				tls_verify_peer = gck_rpc_conf_get_tls_verify_peer("PKCS11_PROXY_TLS_VERIFY_PEER");
+
+			if (! tls_cert_file[0] || ! tls_key_file[0]) {
+				warning(("can't handle tls:// path without tls_cert_file and tls_key_file"));
+				ret =  CKR_FUNCTION_NOT_SUPPORTED;
+				goto done;
+			}
 		}
 	}
 
@@ -1473,7 +1621,7 @@ static CK_RV rpc_C_Finalize(CK_VOID_PTR reserved)
 		call_done(cs, ret);
 	}
 
-	if (ret != CKR_OK)
+	if (ret != CKR_OK && ret != CKR_DEVICE_ERROR)
 		warning(("finalizing the daemon returned an error: %d", ret));
 
 	/* Cleanup the call state pool */

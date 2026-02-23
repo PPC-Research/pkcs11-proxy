@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 #define GCK_RPC_DEFAULT_CONF_PATH "/etc/pkcs11-proxy.conf"
@@ -41,6 +42,13 @@ typedef struct {
 	int tcp_keepintvl;
 	int tcp_keepcnt;
 	char psk_file[2048];
+	char tls_cert_file[2048];
+	char tls_key_file[2048];
+	char tls_ca_file[2048];
+	char tls_ca_path[2048];
+	char tls_crl_file[2048];
+	char tls_mode[256];
+	bool tls_verify_peer;
 } gck_rpc_config_t;
 
 static gck_rpc_config_t gck_rpc_config;
@@ -66,6 +74,7 @@ static char *gck_rpc_trim_whitespace(char *str)
 static void gck_rpc_set_string(const char *raw_value, void *dest)
 {
 	strncpy((char *)dest, raw_value, 255);
+	((char *)dest)[255] = '\0';
 }
 
 static void gck_rpc_set_int(const char *raw_value, void *dest)
@@ -91,6 +100,13 @@ static struct {
 	{"tcp_keepintvl", &gck_rpc_config.tcp_keepintvl, gck_rpc_set_int},
 	{"tcp_keepcnt", &gck_rpc_config.tcp_keepcnt, gck_rpc_set_int},
 	{"psk_file", gck_rpc_config.psk_file, gck_rpc_set_string},
+	{"tls_cert_file", gck_rpc_config.tls_cert_file, gck_rpc_set_string},
+	{"tls_key_file", gck_rpc_config.tls_key_file, gck_rpc_set_string},
+	{"tls_ca_file", gck_rpc_config.tls_ca_file, gck_rpc_set_string},
+	{"tls_ca_path", gck_rpc_config.tls_ca_path, gck_rpc_set_string},
+	{"tls_crl_file", gck_rpc_config.tls_crl_file, gck_rpc_set_string},
+	{"tls_mode", gck_rpc_config.tls_mode, gck_rpc_set_string},
+	{"tls_verify_peer", &gck_rpc_config.tls_verify_peer, gck_rpc_set_bool},
 	{NULL, NULL, NULL} // Sentinel
 };
 
@@ -103,6 +119,13 @@ static void gck_rpc_set_defaults(void)
 	gck_rpc_config.tcp_keepcnt = -1;
 	gck_rpc_config.so_path[0] = '\0';
 	gck_rpc_config.psk_file[0] = '\0';
+	gck_rpc_config.tls_cert_file[0] = '\0';
+	gck_rpc_config.tls_key_file[0] = '\0';
+	gck_rpc_config.tls_ca_file[0] = '\0';
+	gck_rpc_config.tls_ca_path[0] = '\0';
+	gck_rpc_config.tls_crl_file[0] = '\0';
+	gck_rpc_config.tls_mode[0] = '\0';
+	gck_rpc_config.tls_verify_peer = true;
 }
 
 static bool gck_rpc_parse_config_file(const char *filename)
@@ -174,6 +197,69 @@ const char *gck_rpc_conf_get_tls_psk_file(const char *env)
 		return env_value;
 	}
 	return gck_rpc_config.psk_file[0] ? gck_rpc_config.psk_file : NULL;
+}
+
+const char *gck_rpc_conf_get_tls_cert_file(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return env_value;
+	}
+	return gck_rpc_config.tls_cert_file[0] ? gck_rpc_config.tls_cert_file : NULL;
+}
+
+const char *gck_rpc_conf_get_tls_key_file(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return env_value;
+	}
+	return gck_rpc_config.tls_key_file[0] ? gck_rpc_config.tls_key_file : NULL;
+}
+
+const char *gck_rpc_conf_get_tls_ca_file(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return env_value;
+	}
+	return gck_rpc_config.tls_ca_file[0] ? gck_rpc_config.tls_ca_file : NULL;
+}
+
+const char *gck_rpc_conf_get_tls_ca_path(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return env_value;
+	}
+	return gck_rpc_config.tls_ca_path[0] ? gck_rpc_config.tls_ca_path : NULL;
+}
+
+const char *gck_rpc_conf_get_tls_crl_file(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return env_value;
+	}
+	return gck_rpc_config.tls_crl_file[0] ? gck_rpc_config.tls_crl_file : NULL;
+}
+
+const char *gck_rpc_conf_get_tls_mode(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return env_value;
+	}
+	return gck_rpc_config.tls_mode[0] ? gck_rpc_config.tls_mode : NULL;
+}
+
+bool gck_rpc_conf_get_tls_verify_peer(const char *env)
+{
+	const char *env_value = secure_getenv(env);
+	if (env_value && strlen(env_value) > 0) {
+		return (strcasecmp(env_value, "true") == 0 || strcmp(env_value, "1") == 0);
+	}
+	return gck_rpc_config.tls_verify_peer;
 }
 
 int gck_rpc_conf_get_so_recv_timeout(void)

@@ -1,5 +1,5 @@
 /* -*- Mode: C; indent-tabs-mode: t; c-basic-offset: 8; tab-width: 8 -*- */
-/* gck-rpc-tls-psk.c - TLS-PSK functionality to protect communication
+/* gck-rpc-tls.c - TLS functionality (PSK and mTLS) to protect communication
 
    Copyright (C) 2013, NORDUnet A/S
 
@@ -14,9 +14,9 @@
    Library General Public License for more details.
 
    You should have received a copy of the GNU Library General Public
-   License along with the Gnome Library; see the file COPYING.LIB.  If not,
-   write to the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
-   Boston, MA 02111-1307, USA.
+   License along with the Gnome Library General Public License along with this
+   library; see the file COPYING.LIB.  If not, write to the Free Software
+   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
 
    Author: Fredrik Thulin <fredrik@thulin.net>
 */
@@ -24,7 +24,7 @@
 #include "config.h"
 
 #include "gck-rpc-private.h"
-#include "gck-rpc-tls-psk.h"
+#include "gck-rpc-tls.h"
 
 #include <sys/param.h>
 #include <assert.h>
@@ -35,6 +35,10 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
+
+#include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
 
 /* TLS pre-shared key */
 static char tls_psk_identity[1024] = { 0, };
@@ -110,7 +114,7 @@ _tls_psk_decode_key(const char *identity, const char *hexkey, unsigned char *psk
 
 		/* decode second half of byte, check for errors */
 		if ((i = _tls_psk_to_hex(*hexkey)) < 0) {
-		        warning(("bad TLS-PSK '%.100s' hex char at position %i (%c)",
+			warning(("bad TLS-PSK '%.100s' hex char at position %i (%c)",
 				 identity, psk_len + 1, *hexkey));
 			return 0;
 		}
@@ -120,10 +124,9 @@ _tls_psk_decode_key(const char *identity, const char *hexkey, unsigned char *psk
 		psk_len++;
 		psk++;
 	}
-	if (*hexkey) {
+
+	if (*hexkey)
 		warning(("too long TLS-PSK '%.100s' key (max %i)", identity, max_psk_len));
-		return 0;
-	}
 
 	return psk_len;
 }
@@ -131,7 +134,6 @@ _tls_psk_decode_key(const char *identity, const char *hexkey, unsigned char *psk
 /*
  * Callbacks invoked by OpenSSL PSK initialization.
  */
-
 
 /* Server side TLS-PSK initialization callback. Given an identity (chosen by the client),
  * locate a pre-shared key and put it in psk.
@@ -142,9 +144,10 @@ static unsigned int
 _tls_psk_server_cb(SSL *ssl, const char *identity,
 		   unsigned char *psk, unsigned int max_psk_len)
 {
-	char line[1024], *hexkey;
+	char line[1024];
+	char *hexkey;
+	int fd;
 	unsigned int psk_len;
-	int i, fd;
 
 	debug(("Initializing TLS-PSK with keyfile '%.100s', identity '%.100s'",
 	       tls_psk_key_filename, identity));
@@ -157,25 +160,26 @@ _tls_psk_server_cb(SSL *ssl, const char *identity,
 
 	/* Format of PSK file is that of GnuTLS psktool.
 	 *
-	 * identity:hex-key
-	 * other:another-hex-key
-	*/
+	 * 1. A comment line starts with a '#'
+	 * 2. The form of a line is <username>:<hex_password>
+	 */
 	psk_len = 0;
-
-	while (gck_rpc_fgets(line, sizeof(line) - 1, fd) > 0) {
-		/* Find first colon and replace it with NULL */
-		hexkey = strchr(line, ':');
-		if (! hexkey)
+	while (gck_rpc_fgets(line, sizeof(line), fd)) {
+		/* Strip trailing CR/LF */
+		for (hexkey = line; *hexkey != '\0'; hexkey++) {
+			if (*hexkey == '\r' || *hexkey == '\n')
+				*hexkey = '\0';
+		}
+		/* Skip comment lines */
+		if (line[0] == '#')
 			continue;
-		*hexkey = 0;
+		/* Split line to get identity and key */
+		hexkey = strchr(line, ':');
+		if (hexkey == NULL)
+			continue;
+		*hexkey = '\0';
 		hexkey++;
-
-		/* Remove newline(s) at the end */
-		for (i = strlen(hexkey) - 1; i && (hexkey[i] == '\n' || hexkey[i] == '\r'); i--)
-			hexkey[i] = 0;
-
-		if (identity == NULL || ! identity[0] || ! strcmp(line, identity)) {
-			/* If the line starts with identity: or identity is not provided, parse this line. */
+		if (!strcmp(line, identity)) {
 			psk_len = _tls_psk_decode_key(line, hexkey, psk, max_psk_len);
 			if (psk_len)
 				debug(("Loaded TLS-PSK '%.100s' from keyfile '%.100s'",
@@ -186,13 +190,13 @@ _tls_psk_server_cb(SSL *ssl, const char *identity,
 			break;
 		}
 	}
-	close(fd);
 
+	close(fd);
 	return psk_len;
 }
 
 /* Client side TLS-PSK initialization callback. Indicate to OpenSSL what identity to
- * use, and the pre-shared key for that identity.
+ * use for this connection, and locate the PSK for that identity.
  *
  * Returns the number of bytes put in psk, or 0 on failure.
  */
@@ -201,30 +205,20 @@ _tls_psk_client_cb(SSL *ssl, const char *hint,
 		   char *identity, unsigned int max_identity_len,
 		   unsigned char *psk, unsigned int max_psk_len)
 {
-	/* Client tells server which identity it wants to use in ClientKeyExchange */
 	snprintf(identity, max_identity_len, "%s", tls_psk_identity);
-
-	/* We currently just discard the hint sent to us by the server */
 	return _tls_psk_server_cb(ssl, identity, psk, max_psk_len);
 }
 
-
-/* Initialize OpenSSL and create an SSL CTX. Should be called just once.
- *
- * Returns 0 on failure and 1 on success.
- */
-int
-gck_rpc_init_tls_psk(GckRpcTlsPskCtx *tls_ctx, const char *key_filename,
-		     const char *identity, enum gck_rpc_tls_psk_caller caller)
+static int
+_tls_init_ctx_common(GckRpcTlsCtx *tls_ctx, enum gck_rpc_tls_caller caller,
+		     enum gck_rpc_tls_mode mode, int restrict_tls12)
 {
-	char *tls_psk_ciphers = PKCS11PROXY_TLS_PSK_CIPHERS;
-
 	if (tls_ctx->initialized == 1) {
 		warning(("TLS context already initialized"));
 		return 0;
 	}
 
-	assert(caller == GCK_RPC_TLS_PSK_CLIENT || caller == GCK_RPC_TLS_PSK_SERVER);
+	assert(caller == GCK_RPC_TLS_CLIENT || caller == GCK_RPC_TLS_SERVER);
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 	tls_ctx->libctx = OSSL_LIB_CTX_new();
@@ -251,88 +245,191 @@ gck_rpc_init_tls_psk(GckRpcTlsPskCtx *tls_ctx, const char *key_filename,
 	}
 
 	/* Set minimal version to TLS 1.2 */
-	if (!SSL_CTX_set_min_proto_version(tls_ctx->ssl_ctx, TLS1_2_VERSION))	{
-		SSL_CTX_free(tls_ctx->ssl_ctx);
-		tls_ctx->ssl_ctx = NULL;
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-		OSSL_LIB_CTX_free(tls_ctx->libctx);
-		tls_ctx->libctx = NULL;
-#endif
+	if (!SSL_CTX_set_min_proto_version(tls_ctx->ssl_ctx, TLS1_2_VERSION)) {
 		gck_rpc_warn("cannot set minimal protocol version to TLS 1.2");
+		gck_rpc_close_tls_ctx(tls_ctx);
 		return 0;
 	}
 
-	/* Set maximal version to TLS 1.2 */
-	if (!SSL_CTX_set_max_proto_version(tls_ctx->ssl_ctx, TLS1_2_VERSION)) {
-		SSL_CTX_free(tls_ctx->ssl_ctx);
-		tls_ctx->ssl_ctx = NULL;
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-		OSSL_LIB_CTX_free(tls_ctx->libctx);
-		tls_ctx->libctx = NULL;
-#endif
-		gck_rpc_warn("cannot set maximal protocol version to TLS 1.2");
-		return 0;
+	if (restrict_tls12) {
+		/* TLS-PSK only supports TLS 1.2 in this implementation */
+		if (!SSL_CTX_set_max_proto_version(tls_ctx->ssl_ctx, TLS1_2_VERSION)) {
+			gck_rpc_warn("cannot set maximal protocol version to TLS 1.2");
+			gck_rpc_close_tls_ctx(tls_ctx);
+			return 0;
+		}
 	}
+
+	SSL_CTX_set_options(tls_ctx->ssl_ctx, SSL_OP_NO_COMPRESSION);
+	tls_ctx->type = caller;
+	tls_ctx->mode = mode;
+
+	return 1;
+}
+
+static int
+_tls_load_crl(SSL_CTX *ctx, const char *crl_file)
+{
+	X509_STORE *store;
+	X509_LOOKUP *lookup;
+
+	store = SSL_CTX_get_cert_store(ctx);
+	if (!store)
+		return 0;
+
+	lookup = X509_STORE_add_lookup(store, X509_LOOKUP_file());
+	if (!lookup)
+		return 0;
+
+	if (X509_load_crl_file(lookup, crl_file, X509_FILETYPE_PEM) != 1)
+		return 0;
+
+	X509_STORE_set_flags(store, X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL);
+	return 1;
+}
+
+/* Initialize OpenSSL and create an SSL CTX for TLS-PSK. Should be called just once.
+ *
+ * Returns 0 on failure and 1 on success.
+ */
+int
+gck_rpc_init_tls_psk(GckRpcTlsCtx *tls_ctx, const char *key_filename,
+		     const char *identity, enum gck_rpc_tls_caller caller)
+{
+	char *tls_psk_ciphers = PKCS11PROXY_TLS_PSK_CIPHERS;
+	int fd;
+	size_t i;
+
+	if (!_tls_init_ctx_common(tls_ctx, caller, GCK_RPC_TLS_MODE_PSK, 1))
+		return 0;
 
 	/* Set up callback for TLS-PSK initialization */
-	if (caller == GCK_RPC_TLS_PSK_CLIENT)
+	if (caller == GCK_RPC_TLS_CLIENT)
 		SSL_CTX_set_psk_client_callback(tls_ctx->ssl_ctx, _tls_psk_client_cb);
 	else
 		SSL_CTX_set_psk_server_callback(tls_ctx->ssl_ctx, _tls_psk_server_cb);
 
-	/* Disable compression, for security (CRIME Attack). */
-	SSL_CTX_set_options(tls_ctx->ssl_ctx, SSL_OP_NO_COMPRESSION);
-
-	/* Specify ciphers to use */
-	SSL_CTX_set_cipher_list(tls_ctx->ssl_ctx, tls_psk_ciphers);
+	if (!SSL_CTX_set_cipher_list(tls_ctx->ssl_ctx, tls_psk_ciphers)) {
+		gck_rpc_warn("unable to set TLS-PSK ciphers");
+		gck_rpc_close_tls_ctx(tls_ctx);
+		return 0;
+	}
 
 	snprintf(tls_psk_key_filename, sizeof(tls_psk_key_filename), "%s", key_filename);
 
-	/* Let the client tell the server which identity it uses.
-	 * The server doesn't try to find an identity, it'll either accept the first one, or use the hint sent by the client */
-	if (caller == GCK_RPC_TLS_PSK_CLIENT && !identity) {
-		char line[1024], *hexkey;
-		int fd;
-
+	if (caller == GCK_RPC_TLS_CLIENT && !identity) {
 		/* Parse the psk file just to find the identity, and use the first line */
 		if ((fd = open(tls_psk_key_filename, O_RDONLY | O_CLOEXEC)) < 0) {
 			gck_rpc_warn("can't open TLS-PSK keyfile '%.100s' for reading : %s",
-					tls_psk_key_filename, strerror(errno));
+				     tls_psk_key_filename, strerror(errno));
+			gck_rpc_close_tls_ctx(tls_ctx);
 			return 0;
 		}
 
-		if (gck_rpc_fgets(line, sizeof(line) - 1, fd) > 0) {
-			/* Find first colon and set it to null => line is now identity */
-			hexkey = strchr(line, ':');
-			if (hexkey) {
-				*hexkey = 0;
-				/* Client tells server which identity it wants to use in ClientKeyExchange */
-				snprintf(tls_psk_identity, sizeof(tls_psk_identity), "%s", line);
-			}
+		while (gck_rpc_fgets(tls_psk_identity, sizeof(tls_psk_identity), fd)) {
+			/* Stop at first non-comment line and use the identity */
+			if (tls_psk_identity[0] != '#')
+				break;
 		}
 		close(fd);
+		/* Strip trailing CR/LF */
+		for (i = 0; tls_psk_identity[i] != '\0'; i++) {
+			if (tls_psk_identity[i] == '\r' || tls_psk_identity[i] == '\n') {
+				tls_psk_identity[i] = '\0';
+				break;
+			}
+		}
+	} else if (identity) {
+		snprintf(tls_psk_identity, sizeof(tls_psk_identity), "%s", identity);
 	}
 
-	tls_ctx->type = caller;
 	tls_ctx->initialized = 1;
+	debug(("Initialized TLS-PSK %s", caller == GCK_RPC_TLS_CLIENT ? "client" : "server"));
+	return 1;
+}
 
-	debug(("Initialized TLS-PSK %s", caller == GCK_RPC_TLS_PSK_CLIENT ? "client" : "server"));
+/* Initialize OpenSSL and create an SSL CTX for certificate-based TLS (mTLS).
+ *
+ * Returns 0 on failure and 1 on success.
+ */
+int
+gck_rpc_init_tls_cert(GckRpcTlsCtx *tls_ctx, const char *cert_file,
+		      const char *key_file, const char *ca_file,
+		      const char *ca_path, const char *crl_file,
+		      bool verify_peer, enum gck_rpc_tls_caller caller)
+{
+	int verify_mode = SSL_VERIFY_NONE;
 
+	if (!cert_file || !key_file) {
+		gck_rpc_warn("certificate file and key file are required for TLS cert mode");
+		return 0;
+	}
+
+	if (!_tls_init_ctx_common(tls_ctx, caller, GCK_RPC_TLS_MODE_CERT, 0))
+		return 0;
+
+	if (SSL_CTX_use_certificate_chain_file(tls_ctx->ssl_ctx, cert_file) != 1) {
+		gck_rpc_warn("failed loading TLS certificate chain");
+		gck_rpc_close_tls_ctx(tls_ctx);
+		return 0;
+	}
+
+	if (SSL_CTX_use_PrivateKey_file(tls_ctx->ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+		gck_rpc_warn("failed loading TLS private key");
+		gck_rpc_close_tls_ctx(tls_ctx);
+		return 0;
+	}
+
+	if (SSL_CTX_check_private_key(tls_ctx->ssl_ctx) != 1) {
+		gck_rpc_warn("TLS private key does not match the certificate");
+		gck_rpc_close_tls_ctx(tls_ctx);
+		return 0;
+	}
+
+	if (verify_peer) {
+		if (ca_file || ca_path) {
+			if (SSL_CTX_load_verify_locations(tls_ctx->ssl_ctx, ca_file, ca_path) != 1) {
+				gck_rpc_warn("failed loading TLS CA bundle");
+				gck_rpc_close_tls_ctx(tls_ctx);
+				return 0;
+			}
+		} else if (SSL_CTX_set_default_verify_paths(tls_ctx->ssl_ctx) != 1) {
+			gck_rpc_warn("failed loading default TLS CA paths");
+			gck_rpc_close_tls_ctx(tls_ctx);
+			return 0;
+		}
+
+		if (crl_file && crl_file[0]) {
+			if (!_tls_load_crl(tls_ctx->ssl_ctx, crl_file)) {
+				gck_rpc_warn("failed loading TLS CRL");
+				gck_rpc_close_tls_ctx(tls_ctx);
+				return 0;
+			}
+		}
+
+		if (caller == GCK_RPC_TLS_SERVER)
+			verify_mode = SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+		else
+			verify_mode = SSL_VERIFY_PEER;
+	}
+
+	SSL_CTX_set_verify(tls_ctx->ssl_ctx, verify_mode, NULL);
+
+	tls_ctx->initialized = 1;
+	debug(("Initialized TLS-CERT %s", caller == GCK_RPC_TLS_CLIENT ? "client" : "server"));
 	return 1;
 }
 
 /* Set up SSL for a new socket. Call this after accept() or connect().
  *
  * When a socket has been created, call gck_rpc_start_tls() with the TLS state
- * initialized using gck_rpc_init_tls_psk() and the new socket.
- *
- * Returns 1 on success and 0 on failure.
+ * initialized using gck_rpc_init_tls_*() and the new socket.
  */
 int
-gck_rpc_start_tls(GckRpcTlsPskState *state, int sock)
+gck_rpc_start_tls(GckRpcTlsState *state, int sock)
 {
+	char buf[1024];
 	int res;
-	char buf[256];
 
 	state->ssl = SSL_new(state->ctx->ssl_ctx);
 	if (! state->ssl) {
@@ -340,6 +437,7 @@ gck_rpc_start_tls(GckRpcTlsPskState *state, int sock)
 		return 0;
 	}
 
+	/* wrap the TCP socket with a BIO */
 	state->bio = BIO_new_socket(sock, BIO_NOCLOSE);
 	if (! state->bio) {
 		warning(("can't initialize SSL BIO"));
@@ -348,16 +446,16 @@ gck_rpc_start_tls(GckRpcTlsPskState *state, int sock)
 
 	SSL_set_bio(state->ssl, state->bio, state->bio);
 
-	/* Set up callback for TLS-PSK initialization */
-	if (state->ctx->type == GCK_RPC_TLS_PSK_CLIENT)
+	/* Set up callback for TLS initialization */
+	if (state->ctx->type == GCK_RPC_TLS_CLIENT)
 		res = SSL_connect(state->ssl);
 	else
 		res = SSL_accept(state->ssl);
 
-	if (res != 1) {
-		ERR_error_string_n(ERR_get_error(), buf, sizeof(buf));
+	if (res <= 0) {
 		warning(("can't start TLS : %i/%i (%s perhaps)",
 			 res, SSL_get_error(state->ssl, res), strerror(errno)));
+		ERR_error_string_n(ERR_get_error(), buf, sizeof(buf));
 		warning(("SSL ERR: %s", buf));
 		return 0;
 	}
@@ -368,22 +466,25 @@ gck_rpc_start_tls(GckRpcTlsPskState *state, int sock)
 /* Un-initialize everything SSL context related structs. Call this on application shut down.
  */
 void
-gck_rpc_close_tls_ctx(GckRpcTlsPskCtx *tls_ctx)
+gck_rpc_close_tls_ctx(GckRpcTlsCtx *tls_ctx)
 {
 	if (tls_ctx->ssl_ctx) {
 		SSL_CTX_free(tls_ctx->ssl_ctx);
 		tls_ctx->ssl_ctx = NULL;
+	}
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (tls_ctx->libctx) {
 		OSSL_LIB_CTX_free(tls_ctx->libctx);
 		tls_ctx->libctx = NULL;
-#endif
 	}
+#endif
+	tls_ctx->initialized = 0;
 }
 
 /* Un-initialize SSL.
  */
 void
-gck_rpc_close_tls_state(GckRpcTlsPskState *tls_state)
+gck_rpc_close_tls_state(GckRpcTlsState *tls_state)
 {
 	if (tls_state->ssl) {
 		SSL_free(tls_state->ssl);
@@ -394,7 +495,7 @@ gck_rpc_close_tls_state(GckRpcTlsPskState *tls_state)
 /* Un-initialize all SSL.
  */
 void
-gck_rpc_close_tls_all(GckRpcTlsPskState *tls_state)
+gck_rpc_close_tls_all(GckRpcTlsState *tls_state)
 {
 	if (tls_state->ctx)
 		gck_rpc_close_tls_ctx(tls_state->ctx);
@@ -402,101 +503,81 @@ gck_rpc_close_tls_all(GckRpcTlsPskState *tls_state)
 }
 
 /* Send data using SSL.
- *
- * Returns the number of bytes written or -1 on error.
  */
 int
-gck_rpc_tls_write_all(GckRpcTlsPskState *state, void *data, unsigned int len)
+gck_rpc_tls_write_all(GckRpcTlsState *state, void *data, unsigned int len)
 {
 	int ret, ssl_err;
-	char buf[256];
-
-	assert(state);
-	assert(data);
-	assert(len > 0);
+	char buf[1024];
 
 	ret = SSL_write(state->ssl, data, len);
-
 	if (ret > 0)
 		return ret;
 
 	ssl_err = SSL_get_error(state->ssl, ret);
-
 	switch (ssl_err) {
 	case SSL_ERROR_WANT_READ:
 	case SSL_ERROR_WANT_WRITE:
-		// Non-fatal, retry later
-		return 0;
-
+		break;
 	case SSL_ERROR_ZERO_RETURN:
-		// Connection closed cleanly
 		warning(("SSL_write: connection closed"));
-		return -1;
-
+		break;
 	case SSL_ERROR_SYSCALL:
 		if (ret == 0) {
 			warning(("SSL_write: syscall EOF"));
 		} else {
+			if (errno == EPIPE || errno == ECONNRESET)
+				break;
 			perror("SSL_write: syscall error");
 		}
-		return -1;
-
+		break;
 	default:
-		// Print all queued OpenSSL errors
+		/* Print all queued OpenSSL errors */
 		while ((ssl_err = ERR_get_error())) {
 			ERR_error_string_n(ssl_err, buf, sizeof(buf));
 			warning(("SSL_write error: %s", buf));
 		}
-		return -1;
+		break;
 	}
+
+	return -1;
 }
 
 /* Read data using SSL.
- *
- * Returns the number of bytes read or -1 on error.
  */
 int
-gck_rpc_tls_read_all(GckRpcTlsPskState *state, void *data, unsigned int len)
+gck_rpc_tls_read_all(GckRpcTlsState *state, void *data, unsigned int len)
 {
 	int ret, ssl_err;
-	char buf[256];
-
-	assert(state);
-	assert(data);
-	assert(len > 0);
+	char buf[1024];
 
 	ret = SSL_read(state->ssl, data, len);
-
 	if (ret > 0)
 		return ret;
 
 	ssl_err = SSL_get_error(state->ssl, ret);
-
 	switch (ssl_err) {
 	case SSL_ERROR_WANT_READ:
 	case SSL_ERROR_WANT_WRITE:
-		// Non-fatal, retry later
-		return 0;
-
+		break;
 	case SSL_ERROR_ZERO_RETURN:
-		// Connection closed cleanly
 		warning(("SSL_read: connection closed"));
-		return -1;
-
+		break;
 	case SSL_ERROR_SYSCALL:
 		if (ret == 0) {
 			warning(("SSL_read: syscall EOF"));
 		} else {
 			perror("SSL_read: syscall error");
 		}
-		return -1;
-
+		break;
 	default:
-		// Print all queued OpenSSL errors
+		/* Print all queued OpenSSL errors */
 		while ((ssl_err = ERR_get_error())) {
 			ERR_error_string_n(ssl_err, buf, sizeof(buf));
 			warning(("SSL_read error: %s", buf));
 		}
-		return -1;
+		break;
 	}
+
+	return -1;
 }

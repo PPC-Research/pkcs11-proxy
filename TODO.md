@@ -16,7 +16,6 @@
   - adding time prefix
 - Module/Dispatcher: Support more mechanisms
 - TLS: Support TLS 1.3
-- TLS: Add cert support
 
 ## Tests and tools
 

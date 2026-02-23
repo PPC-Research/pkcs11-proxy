@@ -57,9 +57,13 @@ Encryption
 ==========
 
 This version supports encrypting the communication between the client and
-proxy using OpenSSL TLS-PSK (pre-shared key). The PSK is read from a file
-that usees the GnuTLS psktool format. This format includes PSK identity
-as well as key.
+proxy using either TLS-PSK (pre-shared key) or mTLS (mutual TLS).
+
+TLS-PSK
+-------
+
+The PSK is read from a file that uses the GnuTLS psktool format. This format
+includes PSK identity as well as key.
 
 Currently, there is no way to specify the identity to use on the client
 side (client tells server what identity should be used), and the first
@@ -76,6 +80,30 @@ $ PKCS11_PROXY_TLS_PSK_FILE="test.psk" \
 $ PKCS11_PROXY_TLS_PSK_FILE="test.psk" \
   PKCS11_PROXY_SOCKET="tls://server.example.com:2345" \
   pkcs11-tool --module=/usr/lib/libpkcs11-proxy.so -L Available
+
+mTLS
+----
+
+For mTLS, set the TLS mode to "cert" (or "mtls") and provide certificate
+and key files on both client and server. Provide a CA file or CA path used
+to verify the peer, and optionally a CRL file.
+
+$ PKCS11_PROXY_TLS_MODE="cert" \
+  PKCS11_PROXY_TLS_CERT_FILE="/etc/pkcs11-proxy/server.crt" \
+  PKCS11_PROXY_TLS_KEY_FILE="/etc/pkcs11-proxy/server.key" \
+  PKCS11_PROXY_TLS_CA_FILE="/etc/pkcs11-proxy/ca.crt" \
+  PKCS11_DAEMON_SOCKET="tls://server.example.com:2345" \
+  pkcs11-daemon /usr/lib/libsofthsm.so
+
+$ PKCS11_PROXY_TLS_MODE="cert" \
+  PKCS11_PROXY_TLS_CERT_FILE="/etc/pkcs11-proxy/client.crt" \
+  PKCS11_PROXY_TLS_KEY_FILE="/etc/pkcs11-proxy/client.key" \
+  PKCS11_PROXY_TLS_CA_FILE="/etc/pkcs11-proxy/ca.crt" \
+  PKCS11_PROXY_SOCKET="tls://server.example.com:2345" \
+  pkcs11-tool --module=/usr/lib/libpkcs11-proxy.so -L Available
+
+By default, peer verification is enabled. To disable (not recommended),
+set PKCS11_PROXY_TLS_VERIFY_PEER="false".
 slots: Slot 0           SoftHSM
   token label:   test token manuf:   SoftHSM token model:   SoftHSM
   token flags:   rng, login required, PIN initialized, token initialized,
