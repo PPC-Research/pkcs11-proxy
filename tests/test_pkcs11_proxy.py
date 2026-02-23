@@ -10,6 +10,7 @@ import tempfile
 import shutil
 import atexit
 from datetime import datetime, timedelta, timezone
+import ipaddress
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.backends import default_backend
@@ -49,7 +50,7 @@ def _write_pem(path, data):
     with open(path, "wb") as f:
         f.write(data)
 
-def _generate_cert(subject_name, issuer_name, public_key, issuer_key, is_ca=False, san_dns=None):
+def _generate_cert(subject_name, issuer_name, public_key, issuer_key, is_ca=False, san_dns=None, san_ip=None):
     builder = x509.CertificateBuilder()
     builder = builder.subject_name(subject_name)
     builder = builder.issuer_name(issuer_name)
@@ -65,13 +66,18 @@ def _generate_cert(subject_name, issuer_name, public_key, issuer_key, is_ca=Fals
         builder = builder.add_extension(
             x509.BasicConstraints(ca=False, path_length=None), critical=True
         )
+    san_entries = []
     if san_dns:
+        san_entries.append(x509.DNSName(san_dns))
+    if san_ip:
+        san_entries.append(x509.IPAddress(ipaddress.ip_address(san_ip)))
+    if san_entries:
         builder = builder.add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(san_dns)]), critical=False
+            x509.SubjectAlternativeName(san_entries), critical=False
         )
     return builder.sign(private_key=issuer_key, algorithm=hashes.SHA256())
 
-def _generate_mtls_materials():
+def _generate_mtls_materials(server_san_dns=None, server_san_ip="127.0.0.1"):
     temp_dir = tempfile.mkdtemp(prefix="pkcs11-proxy-mtls-")
 
     ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -80,7 +86,14 @@ def _generate_mtls_materials():
 
     server_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     server_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pkcs11-proxy-server")])
-    server_cert = _generate_cert(server_name, ca_name, server_key.public_key(), ca_key, san_dns="127.0.0.1")
+    server_cert = _generate_cert(
+        server_name,
+        ca_name,
+        server_key.public_key(),
+        ca_key,
+        san_dns=server_san_dns,
+        san_ip=server_san_ip,
+    )
 
     client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     client_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pkcs11-proxy-client")])
@@ -217,6 +230,65 @@ def test_mtls_env_setup():
     assert os.path.exists(os.environ["PKCS11_PROXY_TLS_CERT_FILE"])
     assert os.path.exists(os.environ["PKCS11_PROXY_TLS_KEY_FILE"])
     assert os.path.exists(os.environ["PKCS11_PROXY_TLS_CA_FILE"])
+
+def test_mtls_hostname_mismatch_rejected():
+    if not os.getenv("PKCS11_TEST_MTLS"):
+        pytest.skip("mTLS not enabled")
+    if os.getenv("PKCS11_TEST_NO_DAEMON"):
+        pytest.skip("daemon disabled")
+
+    build_dir = os.path.join(os.path.dirname(__file__), "../build")
+    pkcs11_daemon_path = os.path.join(build_dir, "pkcs11-daemon")
+    lib_extension = "dylib" if platform.system() == "Darwin" else "so"
+    proxy_lib_path = os.path.join(build_dir, f"libpkcs11-proxy.{lib_extension}")
+    if not os.path.exists(pkcs11_daemon_path) or not os.path.exists(proxy_lib_path):
+        pytest.skip("pkcs11-daemon or proxy library not built")
+
+    mtls_materials = _generate_mtls_materials(server_san_dns="wrong.host", server_san_ip=None)
+    proxy_socket = "tls://127.0.0.1:2346"
+
+    daemon_env = {
+        **os.environ,
+        "PKCS11_DAEMON_SOCKET": proxy_socket,
+        "PKCS11_PROXY_TLS_MODE": "cert",
+        "PKCS11_PROXY_TLS_CERT_FILE": mtls_materials["server_cert"],
+        "PKCS11_PROXY_TLS_KEY_FILE": mtls_materials["server_key"],
+        "PKCS11_PROXY_TLS_CA_FILE": mtls_materials["ca_cert"],
+        "PKCS11_PROXY_TLS_VERIFY_PEER": "true",
+    }
+
+    old_env = os.environ.copy()
+    daemon_process = subprocess.Popen([pkcs11_daemon_path, get_pkcs11_library_path()], env=daemon_env)
+    try:
+        os.environ["PKCS11_PROXY_SOCKET"] = proxy_socket
+        os.environ["PKCS11_PROXY_TLS_MODE"] = "cert"
+        os.environ["PKCS11_PROXY_TLS_CERT_FILE"] = mtls_materials["client_cert"]
+        os.environ["PKCS11_PROXY_TLS_KEY_FILE"] = mtls_materials["client_key"]
+        os.environ["PKCS11_PROXY_TLS_CA_FILE"] = mtls_materials["ca_cert"]
+        os.environ["PKCS11_PROXY_TLS_VERIFY_PEER"] = "true"
+
+        time.sleep(0.5)
+        with pytest.raises(Exception):
+            lib = pkcs11.lib(proxy_lib_path)
+            token = lib.get_token(token_label="ProxyTestToken")
+            with token.open(user_pin="1234", rw=True):
+                pass
+    finally:
+        if daemon_process.poll() is None:
+            daemon_process.terminate()
+            try:
+                daemon_process.wait(timeout=2)
+            except Exception:
+                daemon_process.kill()
+        shutil.rmtree(mtls_materials["temp_dir"], ignore_errors=True)
+        os.environ.clear()
+        os.environ.update(old_env)
+
+def test_tls_psk_uses_identity_from_file(pkcs11_session):
+    if not os.getenv("PKCS11_TEST_TLS"):
+        pytest.skip("PSK TLS not enabled")
+    mechanisms = pkcs11_session.token.slot.get_mechanisms()
+    assert mechanisms is not None
 
 def test_rsa_generate_keypair(pkcs11_session):
     public_key, private_key = pkcs11_session.generate_keypair(

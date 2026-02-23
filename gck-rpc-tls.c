@@ -387,7 +387,11 @@ gck_rpc_init_tls_psk(GckRpcTlsCtx *tls_ctx, const char *key_filename,
 			if (line[0] == '\0')
 				continue;
 
-			snprintf(tls_psk_identity, sizeof(tls_psk_identity), "%s", line);
+			{
+				size_t id_len = strnlen(line, sizeof(tls_psk_identity) - 1);
+				memmove(tls_psk_identity, line, id_len);
+				tls_psk_identity[id_len] = '\0';
+			}
 			break;
 		}
 		close(fd);

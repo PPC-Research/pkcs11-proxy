@@ -224,6 +224,13 @@ static const char *get_tls_mode_string(void)
 	return gck_rpc_conf_get_tls_mode("PKCS11_PROXY_TLS_MODE");
 }
 
+static const char *get_tls_psk_file(void)
+{
+	if (tls_psk_key_filename[0])
+		return tls_psk_key_filename;
+	return gck_rpc_conf_get_tls_psk_file("PKCS11_PROXY_TLS_PSK_FILE");
+}
+
 static enum gck_rpc_tls_mode resolve_tls_mode(void)
 {
 	const char *mode = get_tls_mode_string();
@@ -544,7 +551,13 @@ static CK_RV call_connect(CallState * cs)
 			}
 
 			if (mode == GCK_RPC_TLS_MODE_PSK) {
-				if (!gck_rpc_init_tls_psk(tls_ctx, tls_psk_key_filename, NULL, GCK_RPC_TLS_CLIENT)) {
+				const char *psk_file = get_tls_psk_file();
+				if (!psk_file || !psk_file[0]) {
+					warning(("TLS-PSK key file not configured"));
+					rv = CKR_DEVICE_ERROR;
+					goto cleanup;
+				}
+				if (!gck_rpc_init_tls_psk(tls_ctx, psk_file, NULL, GCK_RPC_TLS_CLIENT)) {
 					warning(("TLS-PSK initialization failed"));
 					rv = CKR_DEVICE_ERROR;
 					goto cleanup;
@@ -584,8 +597,11 @@ static CK_RV call_connect(CallState * cs)
 		host = NULL;
 	} else {
 		addr.sun_family = AF_UNIX;
-		strncpy(addr.sun_path, pkcs11_socket_path, sizeof(addr.sun_path));
-		addr.sun_path[sizeof(addr.sun_path) - 1] = '\0';
+		if (strlen(pkcs11_socket_path) >= sizeof(addr.sun_path)) {
+			warning(("socket path too long: %s", pkcs11_socket_path));
+			return CKR_DEVICE_ERROR;
+		}
+		snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", pkcs11_socket_path);
 
 		sock = socket(AF_UNIX, SOCK_STREAM, 0);
 		if (sock < 0) {
