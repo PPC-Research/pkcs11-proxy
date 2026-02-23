@@ -175,9 +175,15 @@ bool gck_rpc_conf_init(void)
 {
 	gck_rpc_set_defaults();
 	const char *config_path = secure_getenv("PKCS11_PROXY_CONF_PATH");
-	if (!config_path) {
+	if (!config_path || config_path[0] == '\0') {
+		config_path = GCK_RPC_DEFAULT_CONF_PATH;
+	}
+
+	/* Don't fail if the default config doesn't exist. */
+	if (access(config_path, R_OK) != 0) {
 		return true;
 	}
+
 	return gck_rpc_parse_config_file(config_path);
 }
 
