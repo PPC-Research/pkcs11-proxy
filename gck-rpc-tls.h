@@ -3,6 +3,7 @@
 #define GCKRPC_TLS_H_
 
 #include <stdbool.h>
+#include <netdb.h>
 
 #include "openssl/bio.h"
 #include "openssl/ssl.h"
@@ -36,6 +37,9 @@ typedef struct {
 	GckRpcTlsCtx *ctx;
 	BIO *bio;
 	SSL *ssl;
+	char peer_host[NI_MAXHOST];
+	int peer_host_set;
+	int peer_host_is_ip;
 } GckRpcTlsState;
 
 int gck_rpc_init_tls_psk(GckRpcTlsCtx *tls_ctx, const char *key_filename,
@@ -46,6 +50,7 @@ int gck_rpc_init_tls_cert(GckRpcTlsCtx *tls_ctx, const char *cert_file,
 			  bool verify_peer, enum gck_rpc_tls_caller caller);
 
 int gck_rpc_start_tls(GckRpcTlsState *state, int sock);
+int gck_rpc_tls_set_peer_host(GckRpcTlsState *state, const char *host);
 
 int gck_rpc_tls_write_all(GckRpcTlsState *state, void *data, unsigned int len);
 int gck_rpc_tls_read_all(GckRpcTlsState *state, void *data, unsigned int len);

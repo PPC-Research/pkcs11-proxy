@@ -2408,6 +2408,7 @@ void gck_rpc_layer_accept(GckRpcTlsCtx *tls_ctx)
 	if (new_fd < 0) {
 		gck_rpc_warn("cannot accept pkcs11 connection: %s",
 			     strerror(errno));
+		pthread_mutex_unlock(&pkcs11_dispatchers_mutex);
 		return;
 	}
 
@@ -2415,11 +2416,19 @@ void gck_rpc_layer_accept(GckRpcTlsCtx *tls_ctx)
 	if (ds == NULL) {
 		gck_rpc_warn("out of memory");
 		close(new_fd);
+		pthread_mutex_unlock(&pkcs11_dispatchers_mutex);
 		return;
 	}
 
 	if (tls_ctx != NULL) {
 		tls = calloc(1, sizeof(GckRpcTlsState));
+		if (tls == NULL) {
+			gck_rpc_warn("out of memory");
+			close(new_fd);
+			gck_rpc_free_ds(ds);
+			pthread_mutex_unlock(&pkcs11_dispatchers_mutex);
+			return;
+		}
 		tls->ctx = tls_ctx;
 	}
 
@@ -2436,6 +2445,7 @@ void gck_rpc_layer_accept(GckRpcTlsCtx *tls_ctx)
 		gck_rpc_warn("couldn't start thread: %s", strerror(errno));
 		close(new_fd);
 		gck_rpc_free_ds(ds);
+		pthread_mutex_unlock(&pkcs11_dispatchers_mutex);
 		return;
 	}
 

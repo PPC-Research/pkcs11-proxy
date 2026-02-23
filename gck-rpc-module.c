@@ -499,7 +499,10 @@ static int _connect_to_host_port(char *host, char *port)
 static CK_RV call_connect(CallState * cs)
 {
 	struct sockaddr_un addr;
-	int sock;
+	int sock = -1;
+	CK_RV rv = CKR_DEVICE_ERROR;
+	char *host = NULL;
+	char *port = NULL;
 
 	assert(cs);
 	assert(cs->socket == -1);
@@ -512,8 +515,6 @@ static CK_RV call_connect(CallState * cs)
 
 	if (! strncmp("tcp://", pkcs11_socket_path, 6) ||
 	    ! strncmp("tls://", pkcs11_socket_path, 6)) {
-		char *host, *port;
-
 		if (! gck_rpc_parse_host_port(pkcs11_socket_path + 6, &host, &port)) {
 			gck_rpc_warn("failed parsing pkcs11 socket : %s",
 				     pkcs11_socket_path);
@@ -525,26 +526,28 @@ static CK_RV call_connect(CallState * cs)
 			return CKR_DEVICE_ERROR;
 		}
 
-		free(host);
-
 		if (! strncmp("tls://", pkcs11_socket_path, 6)) {
 			enum gck_rpc_tls_mode mode = resolve_tls_mode();
 			GckRpcTlsCtx *tls_ctx = calloc(1, sizeof(GckRpcTlsCtx));
 			if (tls_ctx == NULL) {
 				warning(("can't allocate memory for TLS context"));
-				return CKR_HOST_MEMORY;
+				rv = CKR_HOST_MEMORY;
+				goto cleanup;
 			}
 
 			cs->tls = calloc(1, sizeof(GckRpcTlsState));
 			if (cs->tls == NULL) {
 				warning(("can't allocate memory for TLS state"));
-				return CKR_HOST_MEMORY;
+				free(tls_ctx);
+				rv = CKR_HOST_MEMORY;
+				goto cleanup;
 			}
 
 			if (mode == GCK_RPC_TLS_MODE_PSK) {
 				if (!gck_rpc_init_tls_psk(tls_ctx, tls_psk_key_filename, NULL, GCK_RPC_TLS_CLIENT)) {
 					warning(("TLS-PSK initialization failed"));
-					return CKR_DEVICE_ERROR;
+					rv = CKR_DEVICE_ERROR;
+					goto cleanup;
 				}
 			} else {
 				const char *cert_file = get_tls_cert_file();
@@ -558,17 +561,27 @@ static CK_RV call_connect(CallState * cs)
 							   ca_path, crl_file, verify_peer,
 							   GCK_RPC_TLS_CLIENT)) {
 					warning(("TLS-CERT initialization failed"));
-					return CKR_DEVICE_ERROR;
+					rv = CKR_DEVICE_ERROR;
+					goto cleanup;
 				}
 			}
 
 			cs->tls->ctx = tls_ctx;
+			if (!gck_rpc_tls_set_peer_host(cs->tls, host)) {
+				warning(("failed setting TLS peer host"));
+				rv = CKR_DEVICE_ERROR;
+				goto cleanup;
+			}
 
 			if (! gck_rpc_start_tls(cs->tls, sock)) {
 				gck_rpc_warn("failed starting TLS");
-				return CKR_DEVICE_ERROR;
+				rv = CKR_DEVICE_ERROR;
+				goto cleanup;
 			}
 		}
+
+		free(host);
+		host = NULL;
 	} else {
 		addr.sun_family = AF_UNIX;
 		strncpy(addr.sun_path, pkcs11_socket_path, sizeof(addr.sun_path));
@@ -583,11 +596,11 @@ static CK_RV call_connect(CallState * cs)
 
 #ifndef __MINGW32__
 		/* close on exec */
-		if (fcntl(sock, F_SETFD, 1) == -1) {
-			close(sock);
-			warning(("couldn't secure socket: %s", strerror(errno)));
-			return CKR_DEVICE_ERROR;
-		}
+			if (fcntl(sock, F_SETFD, 1) == -1) {
+				close(sock);
+				warning(("couldn't secure socket: %s", strerror(errno)));
+				return CKR_DEVICE_ERROR;
+			}
 #endif
 
 		if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -604,6 +617,19 @@ static CK_RV call_connect(CallState * cs)
 
 	return call_write(cs, (unsigned char*)&pkcs11_app_id,
 			  sizeof(pkcs11_app_id));
+
+cleanup:
+	if (cs->tls) {
+		gck_rpc_close_tls_all(cs->tls);
+		free(cs->tls->ctx);
+		free(cs->tls);
+		cs->tls = NULL;
+	}
+	if (sock != -1)
+		close(sock);
+	if (host)
+		free(host);
+	return rv;
 }
 
 static void call_destroy(void *value)
@@ -658,7 +684,7 @@ static CK_RV call_lookup(CallState ** ret)
 		/* Try to connect the call */
 		rv = call_connect(cs);
 		if (rv != CKR_OK) {
-			free(cs);
+			call_destroy(cs);
 			return rv;
 		}
 	}
