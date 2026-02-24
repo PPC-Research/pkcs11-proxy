@@ -71,18 +71,19 @@ static char *gck_rpc_trim_whitespace(char *str)
 	return str;
 }
 
-static void gck_rpc_set_string(const char *raw_value, void *dest)
+static void gck_rpc_set_string(const char *raw_value, void *dest, size_t dest_len)
 {
-	strncpy((char *)dest, raw_value, 255);
-	((char *)dest)[255] = '\0';
+	if (!dest || dest_len == 0)
+		return;
+	snprintf((char *)dest, dest_len, "%s", raw_value);
 }
 
-static void gck_rpc_set_int(const char *raw_value, void *dest)
+static void gck_rpc_set_int(const char *raw_value, void *dest, size_t dest_len)
 {
 	*(int *)dest = atoi(raw_value);
 }
 
-static void gck_rpc_set_bool(const char *raw_value, void *dest)
+static void gck_rpc_set_bool(const char *raw_value, void *dest, size_t dest_len)
 {
 	*(bool *)dest = (strcasecmp(raw_value, "true") == 0 || strcmp(raw_value, "1") == 0);
 }
@@ -91,23 +92,24 @@ static void gck_rpc_set_bool(const char *raw_value, void *dest)
 static struct {
 	const char *key;
 	void *value;
-	void (*setter)(const char *raw_value, void *dest);
+	size_t value_len;
+	void (*setter)(const char *raw_value, void *dest, size_t dest_len);
 } gck_rpc_config_options[] = {
-	{"so_path", gck_rpc_config.so_path, gck_rpc_set_string},
-	{"so_recv_timeout", &gck_rpc_config.so_recv_timeout, gck_rpc_set_int},
-	{"so_keepalive", &gck_rpc_config.so_keepalive, gck_rpc_set_bool},
-	{"tcp_keepidle", &gck_rpc_config.tcp_keepidle, gck_rpc_set_int},
-	{"tcp_keepintvl", &gck_rpc_config.tcp_keepintvl, gck_rpc_set_int},
-	{"tcp_keepcnt", &gck_rpc_config.tcp_keepcnt, gck_rpc_set_int},
-	{"psk_file", gck_rpc_config.psk_file, gck_rpc_set_string},
-	{"tls_cert_file", gck_rpc_config.tls_cert_file, gck_rpc_set_string},
-	{"tls_key_file", gck_rpc_config.tls_key_file, gck_rpc_set_string},
-	{"tls_ca_file", gck_rpc_config.tls_ca_file, gck_rpc_set_string},
-	{"tls_ca_path", gck_rpc_config.tls_ca_path, gck_rpc_set_string},
-	{"tls_crl_file", gck_rpc_config.tls_crl_file, gck_rpc_set_string},
-	{"tls_mode", gck_rpc_config.tls_mode, gck_rpc_set_string},
-	{"tls_verify_peer", &gck_rpc_config.tls_verify_peer, gck_rpc_set_bool},
-	{NULL, NULL, NULL} // Sentinel
+	{"so_path", gck_rpc_config.so_path, sizeof(gck_rpc_config.so_path), gck_rpc_set_string},
+	{"so_recv_timeout", &gck_rpc_config.so_recv_timeout, 0, gck_rpc_set_int},
+	{"so_keepalive", &gck_rpc_config.so_keepalive, 0, gck_rpc_set_bool},
+	{"tcp_keepidle", &gck_rpc_config.tcp_keepidle, 0, gck_rpc_set_int},
+	{"tcp_keepintvl", &gck_rpc_config.tcp_keepintvl, 0, gck_rpc_set_int},
+	{"tcp_keepcnt", &gck_rpc_config.tcp_keepcnt, 0, gck_rpc_set_int},
+	{"psk_file", gck_rpc_config.psk_file, sizeof(gck_rpc_config.psk_file), gck_rpc_set_string},
+	{"tls_cert_file", gck_rpc_config.tls_cert_file, sizeof(gck_rpc_config.tls_cert_file), gck_rpc_set_string},
+	{"tls_key_file", gck_rpc_config.tls_key_file, sizeof(gck_rpc_config.tls_key_file), gck_rpc_set_string},
+	{"tls_ca_file", gck_rpc_config.tls_ca_file, sizeof(gck_rpc_config.tls_ca_file), gck_rpc_set_string},
+	{"tls_ca_path", gck_rpc_config.tls_ca_path, sizeof(gck_rpc_config.tls_ca_path), gck_rpc_set_string},
+	{"tls_crl_file", gck_rpc_config.tls_crl_file, sizeof(gck_rpc_config.tls_crl_file), gck_rpc_set_string},
+	{"tls_mode", gck_rpc_config.tls_mode, sizeof(gck_rpc_config.tls_mode), gck_rpc_set_string},
+	{"tls_verify_peer", &gck_rpc_config.tls_verify_peer, 0, gck_rpc_set_bool},
+	{NULL, NULL, 0, NULL} // Sentinel
 };
 
 static void gck_rpc_set_defaults(void)
@@ -153,13 +155,14 @@ static bool gck_rpc_parse_config_file(const char *filename)
 		char *value = gck_rpc_trim_whitespace(delimiter + 1);
 
 		bool matched = false;
-		for (int i = 0; gck_rpc_config_options[i].key != NULL; ++i) {
-			if (strcmp(gck_rpc_config_options[i].key, key) == 0) {
-				gck_rpc_config_options[i].setter(value, gck_rpc_config_options[i].value);
-				matched = true;
-				break;
+			for (int i = 0; gck_rpc_config_options[i].key != NULL; ++i) {
+				if (strcmp(gck_rpc_config_options[i].key, key) == 0) {
+					gck_rpc_config_options[i].setter(value, gck_rpc_config_options[i].value,
+									 gck_rpc_config_options[i].value_len);
+					matched = true;
+					break;
+				}
 			}
-		}
 
 		if (!matched) {
 			fprintf(stderr, "Unknown key in config: %s\n", key);

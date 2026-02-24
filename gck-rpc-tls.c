@@ -36,14 +36,50 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <ctype.h>
+#include <arpa/inet.h>
 
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>
 
 /* TLS pre-shared key */
 static char tls_psk_identity[1024] = { 0, };
 static char tls_psk_key_filename[MAXPATHLEN] = { 0, };
 
+static char *
+_tls_trim_whitespace(char *str)
+{
+	char *end;
+
+	while (*str && isspace((unsigned char)*str))
+		str++;
+	if (*str == '\0')
+		return str;
+	end = str + strlen(str) - 1;
+	while (end > str && isspace((unsigned char)*end))
+		end--;
+	*(end + 1) = '\0';
+	return str;
+}
+
+int
+gck_rpc_tls_set_peer_host(GckRpcTlsState *state, const char *host)
+{
+	unsigned char buf[sizeof(struct in6_addr)];
+
+	if (!state || !host || !host[0])
+		return 0;
+
+	snprintf(state->peer_host, sizeof(state->peer_host), "%s", host);
+	state->peer_host_set = 1;
+	state->peer_host_is_ip = 0;
+
+	if (inet_pton(AF_INET, host, buf) == 1 || inet_pton(AF_INET6, host, buf) == 1)
+		state->peer_host_is_ip = 1;
+
+	return 1;
+}
 /* -----------------------------------------------------------------------------
  * LOGGING and DEBUGGING
  */
@@ -327,18 +363,38 @@ gck_rpc_init_tls_psk(GckRpcTlsCtx *tls_ctx, const char *key_filename,
 		}
 
 		while (gck_rpc_fgets(tls_psk_identity, sizeof(tls_psk_identity), fd)) {
-			/* Stop at first non-comment line and use the identity */
-			if (tls_psk_identity[0] != '#')
-				break;
+			char *line = tls_psk_identity;
+			char *hexkey;
+
+			/* Strip trailing CR/LF */
+			for (i = 0; line[i] != '\0'; i++) {
+				if (line[i] == '\r' || line[i] == '\n') {
+					line[i] = '\0';
+					break;
+				}
+			}
+
+			line = _tls_trim_whitespace(line);
+			if (line[0] == '\0' || line[0] == '#')
+				continue;
+
+			hexkey = strchr(line, ':');
+			if (!hexkey)
+				continue;
+
+			*hexkey = '\0';
+			line = _tls_trim_whitespace(line);
+			if (line[0] == '\0')
+				continue;
+
+			{
+				size_t id_len = strnlen(line, sizeof(tls_psk_identity) - 1);
+				memmove(tls_psk_identity, line, id_len);
+				tls_psk_identity[id_len] = '\0';
+			}
+			break;
 		}
 		close(fd);
-		/* Strip trailing CR/LF */
-		for (i = 0; tls_psk_identity[i] != '\0'; i++) {
-			if (tls_psk_identity[i] == '\r' || tls_psk_identity[i] == '\n') {
-				tls_psk_identity[i] = '\0';
-				break;
-			}
-		}
 	} else if (identity) {
 		snprintf(tls_psk_identity, sizeof(tls_psk_identity), "%s", identity);
 	}
@@ -446,6 +502,33 @@ gck_rpc_start_tls(GckRpcTlsState *state, int sock)
 
 	SSL_set_bio(state->ssl, state->bio, state->bio);
 
+	if (state->ctx->type == GCK_RPC_TLS_CLIENT &&
+	    state->ctx->mode == GCK_RPC_TLS_MODE_CERT &&
+	    state->peer_host_set) {
+		X509_VERIFY_PARAM *param = SSL_get0_param(state->ssl);
+
+		if (!param) {
+			warning(("can't get X509 verify params"));
+			return 0;
+		}
+
+		if (state->peer_host_is_ip) {
+			if (!X509_VERIFY_PARAM_set1_ip_asc(param, state->peer_host)) {
+				warning(("failed to set TLS peer IP for verification"));
+				return 0;
+			}
+		} else {
+			if (!SSL_set_tlsext_host_name(state->ssl, state->peer_host)) {
+				warning(("failed to set TLS SNI"));
+				return 0;
+			}
+			if (!X509_VERIFY_PARAM_set1_host(param, state->peer_host, 0)) {
+				warning(("failed to set TLS peer host for verification"));
+				return 0;
+			}
+		}
+	}
+
 	/* Set up callback for TLS initialization */
 	if (state->ctx->type == GCK_RPC_TLS_CLIENT)
 		res = SSL_connect(state->ssl);
@@ -510,32 +593,35 @@ gck_rpc_tls_write_all(GckRpcTlsState *state, void *data, unsigned int len)
 	int ret, ssl_err;
 	char buf[1024];
 
-	ret = SSL_write(state->ssl, data, len);
-	if (ret > 0)
-		return ret;
+	for (;;) {
+		ret = SSL_write(state->ssl, data, len);
+		if (ret > 0)
+			return ret;
 
-	ssl_err = SSL_get_error(state->ssl, ret);
-	switch (ssl_err) {
-	case SSL_ERROR_WANT_READ:
-	case SSL_ERROR_WANT_WRITE:
-		break;
-	case SSL_ERROR_ZERO_RETURN:
-		warning(("SSL_write: connection closed"));
-		break;
-	case SSL_ERROR_SYSCALL:
-		if (ret == 0) {
-			warning(("SSL_write: syscall EOF"));
-		} else {
-			if (errno == EPIPE || errno == ECONNRESET)
-				break;
-			perror("SSL_write: syscall error");
-		}
-		break;
-	default:
-		/* Print all queued OpenSSL errors */
-		while ((ssl_err = ERR_get_error())) {
-			ERR_error_string_n(ssl_err, buf, sizeof(buf));
-			warning(("SSL_write error: %s", buf));
+		ssl_err = SSL_get_error(state->ssl, ret);
+		switch (ssl_err) {
+		case SSL_ERROR_WANT_READ:
+		case SSL_ERROR_WANT_WRITE:
+			continue;
+		case SSL_ERROR_ZERO_RETURN:
+			warning(("SSL_write: connection closed"));
+			break;
+		case SSL_ERROR_SYSCALL:
+			if (ret == 0) {
+				warning(("SSL_write: syscall EOF"));
+			} else {
+				if (errno == EPIPE || errno == ECONNRESET)
+					break;
+				perror("SSL_write: syscall error");
+			}
+			break;
+		default:
+			/* Print all queued OpenSSL errors */
+			while ((ssl_err = ERR_get_error())) {
+				ERR_error_string_n(ssl_err, buf, sizeof(buf));
+				warning(("SSL_write error: %s", buf));
+			}
+			break;
 		}
 		break;
 	}
@@ -551,30 +637,33 @@ gck_rpc_tls_read_all(GckRpcTlsState *state, void *data, unsigned int len)
 	int ret, ssl_err;
 	char buf[1024];
 
-	ret = SSL_read(state->ssl, data, len);
-	if (ret > 0)
-		return ret;
+	for (;;) {
+		ret = SSL_read(state->ssl, data, len);
+		if (ret > 0)
+			return ret;
 
-	ssl_err = SSL_get_error(state->ssl, ret);
-	switch (ssl_err) {
-	case SSL_ERROR_WANT_READ:
-	case SSL_ERROR_WANT_WRITE:
-		break;
-	case SSL_ERROR_ZERO_RETURN:
-		warning(("SSL_read: connection closed"));
-		break;
-	case SSL_ERROR_SYSCALL:
-		if (ret == 0) {
-			warning(("SSL_read: syscall EOF"));
-		} else {
-			perror("SSL_read: syscall error");
-		}
-		break;
-	default:
-		/* Print all queued OpenSSL errors */
-		while ((ssl_err = ERR_get_error())) {
-			ERR_error_string_n(ssl_err, buf, sizeof(buf));
-			warning(("SSL_read error: %s", buf));
+		ssl_err = SSL_get_error(state->ssl, ret);
+		switch (ssl_err) {
+		case SSL_ERROR_WANT_READ:
+		case SSL_ERROR_WANT_WRITE:
+			continue;
+		case SSL_ERROR_ZERO_RETURN:
+			warning(("SSL_read: connection closed"));
+			break;
+		case SSL_ERROR_SYSCALL:
+			if (ret == 0) {
+				warning(("SSL_read: syscall EOF"));
+			} else {
+				perror("SSL_read: syscall error");
+			}
+			break;
+		default:
+			/* Print all queued OpenSSL errors */
+			while ((ssl_err = ERR_get_error())) {
+				ERR_error_string_n(ssl_err, buf, sizeof(buf));
+				warning(("SSL_read error: %s", buf));
+			}
+			break;
 		}
 		break;
 	}

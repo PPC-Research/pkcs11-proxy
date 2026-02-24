@@ -1,49 +1,61 @@
-name: CI for pkcs11-proxy
+name: CI
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
+  push:
     branches:
       - main
 
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v4
-        with:
-          python-version: 3.12
-
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y softhsm2 gcc cmake libseccomp-dev libssl-dev opensc
+          sudo apt-get install -y \
+            cmake \
+            gcc \
+            make \
+            pkg-config \
+            libssl-dev \
+            softhsm2 \
+            opensc
 
-      - name: Build pkcs11-proxy
-        run: |
-          mkdir build
-          cd build
-          cmake ..
-          make
-
-      - name: Set up SoftHSM2
-        run: |
-          cd tests
-          ./setup-softhsm2.sh
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
       - name: Install Python dependencies
         run: |
-          pip install -r tests/requirements.txt
+          python -m pip install --upgrade pip
+          python -m pip install pytest python-pkcs11 cryptography
 
-      - name: Run tests with TCP connection
-        run: pytest
+      - name: Prepare SoftHSM token
+        shell: bash
+        run: |
+          set -e
+          source tests/setup-softhsm2.sh
+          echo "SOFTHSM2_CONF=$SOFTHSM2_CONF" >> "$GITHUB_ENV"
+          echo "PKCS11_MODULE=$PKCS11_MODULE" >> "$GITHUB_ENV"
 
-      - name: Run tests with TLS PSK connection
-        run: PKCS11_TEST_TLS=1 pytest
+      - name: Build
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+
+      - name: Run tests (PSK TLS)
+        env:
+          PKCS11_TEST_TLS: "1"
+        run: |
+          pytest -q tests
+
+      - name: Run tests (mTLS)
+        env:
+          PKCS11_TEST_MTLS: "1"
+        run: |
+          pytest -q tests
