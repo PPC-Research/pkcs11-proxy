@@ -28,6 +28,8 @@
 #include "gck-rpc-conf.h"
 #include "gck-rpc-layer.h"
 #include "gck-rpc-tls.h"
+#include "gck-rpc-authz.h"
+#include "gck-rpc-util.h"
 
 #include <stdio.h>
 #include <errno.h>
@@ -38,6 +40,7 @@
 #include <signal.h>
 
 #include <dlfcn.h>
+
 #include <pthread.h>
 
 #include <syslog.h>
@@ -229,6 +232,7 @@ int main(int argc, char *argv[])
 		usage();
 
         openlog("pkcs11-proxy",LOG_CONS|LOG_PID,LOG_DAEMON);
+	gck_rpc_warn("AUTHZ: diag version %s", gck_rpc_authz_diag_version);
 
 	/* Load the library */
 	module = dlopen(argv[1], RTLD_NOW);

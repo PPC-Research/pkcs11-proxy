@@ -1,0 +1,37 @@
+services:
+  pkcs11-proxy-server:
+    image: pkcs11-proxy-server:dev
+    container_name: pkcs11-proxy-server
+    command: ["/init"]
+    privileged: true
+    ports:
+      - "4511:4511"
+    volumes:
+      - ./volumes/softhsm:/var/lib/softhsm
+      - ./volumes/logs:/var/log/pkcs11-proxy
+      - ./certs:/etc/mtls:ro
+      - ./authz.json:/etc/pkcs11-proxy/authz.json:ro
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      default:
+        aliases:
+          - pkcs11-server
+    tty: true
+    stdin_open: true
+
+  pkcs11-proxy-client:
+    image: pkcs11-proxy-client:dev
+    container_name: pkcs11-proxy-client
+    command: ["/init"]
+    privileged: true
+    depends_on:
+      - pkcs11-proxy-server
+    volumes:
+      - ./certs:/etc/mtls:ro
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    tty: true
+    stdin_open: true

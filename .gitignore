@@ -21,6 +21,24 @@ softhsm2.conf
 tokens/
 pkcs11_tls.psk
 
+# demo artifacts
+mtls-demo/certs/*.crt
+mtls-demo/certs/*.key
+mtls-demo/certs/*.csr
+mtls-demo/certs/*.srl
+mtls-demo/certs/*.ext
+mtls-demo/authz.json
+mtls-demo/.nix-client-image
+mtls-demo/.nix-server-image
+mtls-demo/*.pcap
+mtls-demo/*.pcapng
+mtls-demo/sslkeys.log
+result
+
+# tools (local binaries)
+tools/authz-parser/authz-policy-parse
+tools/authz-parser/authz-policy-test
+
 # editors
 .\#*
 \#*#

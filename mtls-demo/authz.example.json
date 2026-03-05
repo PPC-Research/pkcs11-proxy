@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "default": "deny",
+  "clients": [
+    {
+      "id_type": "cert_fingerprint_sha256",
+      "id": "PUT_CLIENT_CERT_SHA256_FINGERPRINT_HERE",
+      "allow": {
+        "pkcs11_functions": [
+          "C_Initialize",
+          "C_Finalize",
+          "C_GetInfo",
+          "C_GetSlotList",
+          "C_GetSlotInfo",
+          "C_GetTokenInfo",
+          "C_GetMechanismList",
+          "C_OpenSession",
+          "C_CloseSession",
+          "C_GetSessionInfo",
+          "C_Login",
+          "C_Logout",
+          "C_FindObjectsInit",
+          "C_FindObjects",
+          "C_FindObjectsFinal",
+          "C_GetAttributeValue",
+          "C_GenerateRandom",
+          "C_SignInit",
+          "C_Sign"
+        ],
+        "tokens": ["ProxyTestToken"],
+        "objects": ["ProxyTestExistingECKey"]
+      }
+    }
+  ]
+}
