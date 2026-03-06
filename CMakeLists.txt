@@ -32,11 +32,14 @@ set(PKCS11_PROXY_SRCS
 
 set(PKCS11_DAEMON_SRCS
     egg-buffer.c
+    gck-rpc-authz.c
+    authz-policy-parser.c
     gck-rpc-conf.c
     gck-rpc-daemon-standalone.c
     gck-rpc-dispatch.c
     gck-rpc-message.c
     gck-rpc-util.c
+    jsmn.c
     syscall-reporter.c
     syscall-names.h
     gck-rpc-tls.c
@@ -80,6 +83,8 @@ if (WIN32)
 else()
     add_executable(pkcs11-daemon ${PKCS11_DAEMON_SRCS})
 endif()
+
+target_compile_definitions(pkcs11-daemon PRIVATE _GNU_SOURCE)
 
 # Link OpenSSL and other necessary libraries to the daemon
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")

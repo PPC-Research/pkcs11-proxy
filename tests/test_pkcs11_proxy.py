@@ -131,6 +131,7 @@ def _generate_mtls_materials(server_san_dns=None, server_san_ip="127.0.0.1"):
         "client_key": client_key_path,
     }
 
+
 def _get_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -634,6 +635,7 @@ def test_mtls_failure_then_success():
         shutil.rmtree(wrong_ca["temp_dir"], ignore_errors=True)
         os.environ.clear()
         os.environ.update(old_env)
+
 
 def test_conf_long_psk_path_not_truncated():
     proxy_lib_path = _load_proxy_lib()

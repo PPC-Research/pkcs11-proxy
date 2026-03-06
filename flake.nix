@@ -48,12 +48,19 @@
               pythonEnv
               pkgs.softhsm
               pkgs.opensc
+              pkgs.pkcs11-provider
+              pkgs.openssl
+              pkgs.docker
+              pkgs.docker-compose
             ];
 
             shellHook = ''
               echo "pkcs11-proxy dev shell with PyKCS11"
               echo "Python with PyKCS11: $(python --version)"
               echo "Try: python -c 'import PyKCS11; print(PyKCS11.__version__)'"
+              if ! [ -S /var/run/docker.sock ]; then
+                echo "Note: /var/run/docker.sock not found. Start Docker daemon if you plan to use mtls-demo."
+              fi
               echo
               echo "Building instructions:"
               echo "  cmake . -B build -DCMAKE_BUILD_TYPE=Release"

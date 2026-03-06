@@ -26,6 +26,7 @@
 #include "gck-rpc-layer.h"
 #include "gck-rpc-private.h"
 #include "gck-rpc-tls.h"
+#include "gck-rpc-authz.h"
 
 #include "pkcs11/pkcs11.h"
 #include "pkcs11/pkcs11g.h"
@@ -102,6 +103,7 @@ struct _CallState {
 	 */
 	SessionState sessions[PKCS11PROXY_MAX_SESSION_COUNT];
 	GckRpcTlsState *tls;
+	GckRpcAuthzClientCtx authz;
 };
 
 typedef struct _DispatchState {
@@ -240,6 +242,7 @@ static void call_uninit(CallState * cs)
 
 	gck_rpc_message_free(cs->req);
 	gck_rpc_message_free(cs->resp);
+	gck_rpc_authz_client_ctx_free(&cs->authz);
 }
 
 /* -------------------------------------------------------------------
@@ -1326,10 +1329,19 @@ static CK_RV rpc_C_CreateObject(CallState * cs)
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG count;
 	CK_OBJECT_HANDLE new_object;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_CreateObject);
 	IN_ULONG(session);
 	IN_ATTRIBUTE_ARRAY(template, count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = template;
+	authz_req.template_count = count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_CreateObject, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, template, count, &new_object));
 	OUT_ULONG(new_object);
 	END_CALL;
@@ -1342,11 +1354,22 @@ static CK_RV rpc_C_CopyObject(CallState * cs)
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG count;
 	CK_OBJECT_HANDLE new_object;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_CopyObject);
 	IN_ULONG(session);
 	IN_ULONG(object);
 	IN_ATTRIBUTE_ARRAY(template, count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = object;
+	authz_req.template = template;
+	authz_req.template_count = count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_CopyObject, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, object, template, count, &new_object));
 	OUT_ULONG(new_object);
 	END_CALL;
@@ -1356,10 +1379,19 @@ static CK_RV rpc_C_DestroyObject(CallState * cs)
 {
 	CK_SESSION_HANDLE session;
 	CK_OBJECT_HANDLE object;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_DestroyObject);
 	IN_ULONG(session);
 	IN_ULONG(object);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = object;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_DestroyObject, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, object));
 	END_CALL;
 }
@@ -1452,11 +1484,20 @@ static CK_RV rpc_C_EncryptInit(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_MECHANISM mechanism;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_EncryptInit);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ULONG(key);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_EncryptInit, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, key));
 	END_CALL;
 
@@ -1469,11 +1510,18 @@ static CK_RV rpc_C_Encrypt(CallState * cs)
 	CK_ULONG data_len;
 	CK_BYTE_PTR encrypted_data;
 	DECLARE_CK_ULONG_PTR(encrypted_data_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_Encrypt);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(data, data_len);
 	IN_BYTE_BUFFER(encrypted_data, encrypted_data_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_Encrypt, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, data, data_len, encrypted_data,
 		      encrypted_data_len));
 	OUT_BYTE_ARRAY(encrypted_data, encrypted_data_len);
@@ -1487,11 +1535,18 @@ static CK_RV rpc_C_EncryptUpdate(CallState * cs)
 	CK_ULONG part_len;
 	CK_BYTE_PTR encrypted_part;
 	DECLARE_CK_ULONG_PTR(encrypted_part_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_EncryptUpdate);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(part, part_len);
 	IN_BYTE_BUFFER(encrypted_part, encrypted_part_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_EncryptUpdate, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, part, part_len, encrypted_part,
 		      encrypted_part_len));
 	OUT_BYTE_ARRAY(encrypted_part, encrypted_part_len);
@@ -1503,10 +1558,17 @@ static CK_RV rpc_C_EncryptFinal(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_BYTE_PTR last_encrypted_part;
 	DECLARE_CK_ULONG_PTR(last_encrypted_part_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_EncryptFinal);
 	IN_ULONG(session);
 	IN_BYTE_BUFFER(last_encrypted_part, last_encrypted_part_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_EncryptFinal, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, last_encrypted_part, last_encrypted_part_len));
 	OUT_BYTE_ARRAY(last_encrypted_part, last_encrypted_part_len);
 	END_CALL;
@@ -1517,11 +1579,20 @@ static CK_RV rpc_C_DecryptInit(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_MECHANISM mechanism;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_DecryptInit);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ULONG(key);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_DecryptInit, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, key));
 	END_CALL;
 }
@@ -1533,11 +1604,18 @@ static CK_RV rpc_C_Decrypt(CallState * cs)
 	CK_ULONG encrypted_data_len;
 	CK_BYTE_PTR data;
 	DECLARE_CK_ULONG_PTR(data_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_Decrypt);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(encrypted_data, encrypted_data_len);
 	IN_BYTE_BUFFER(data, data_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_Decrypt, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, encrypted_data, encrypted_data_len, data,
 		      data_len));
 	OUT_BYTE_ARRAY(data, data_len);
@@ -1551,11 +1629,18 @@ static CK_RV rpc_C_DecryptUpdate(CallState * cs)
 	CK_ULONG encrypted_part_len;
 	CK_BYTE_PTR part;
 	DECLARE_CK_ULONG_PTR(part_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_DecryptUpdate);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(encrypted_part, encrypted_part_len);
 	IN_BYTE_BUFFER(part, part_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_DecryptUpdate, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, encrypted_part, encrypted_part_len, part,
 		      part_len));
 	OUT_BYTE_ARRAY(part, part_len);
@@ -1567,10 +1652,17 @@ static CK_RV rpc_C_DecryptFinal(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_BYTE_PTR last_part;
 	DECLARE_CK_ULONG_PTR(last_part_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_DecryptFinal);
 	IN_ULONG(session);
 	IN_BYTE_BUFFER(last_part, last_part_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_DecryptFinal, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, last_part, last_part_len));
 	OUT_BYTE_ARRAY(last_part, last_part_len);
 	END_CALL;
@@ -1649,11 +1741,20 @@ static CK_RV rpc_C_SignInit(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_MECHANISM mechanism;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_SignInit);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ULONG(key);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_SignInit, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, key));
 	END_CALL;
 }
@@ -1665,11 +1766,18 @@ static CK_RV rpc_C_Sign(CallState * cs)
 	CK_ULONG part_len;
 	CK_BYTE_PTR signature;
 	DECLARE_CK_ULONG_PTR(signature_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_Sign);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(part, part_len);
 	IN_BYTE_BUFFER(signature, signature_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_Sign, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, part, part_len, signature, signature_len));
 	OUT_BYTE_ARRAY(signature, signature_len);
 	END_CALL;
@@ -1681,10 +1789,17 @@ static CK_RV rpc_C_SignUpdate(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_BYTE_PTR part;
 	CK_ULONG part_len;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_SignUpdate);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(part, part_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_SignUpdate, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, part, part_len));
 	END_CALL;
 }
@@ -1694,10 +1809,17 @@ static CK_RV rpc_C_SignFinal(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_BYTE_PTR signature;
 	DECLARE_CK_ULONG_PTR(signature_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_SignFinal);
 	IN_ULONG(session);
 	IN_BYTE_BUFFER(signature, signature_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_SignFinal, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, signature, signature_len));
 	OUT_BYTE_ARRAY(signature, signature_len);
 	END_CALL;
@@ -1708,11 +1830,20 @@ static CK_RV rpc_C_SignRecoverInit(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_MECHANISM mechanism;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_SignRecoverInit);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ULONG(key);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_SignRecoverInit, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, key));
 	END_CALL;
 }
@@ -1724,11 +1855,18 @@ static CK_RV rpc_C_SignRecover(CallState * cs)
 	CK_ULONG data_len;
 	CK_BYTE_PTR signature;
 	DECLARE_CK_ULONG_PTR(signature_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_SignRecover);
 	IN_ULONG(session);
 	IN_BYTE_ARRAY(data, data_len);
 	IN_BYTE_BUFFER(signature, signature_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_SignRecover, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, data, data_len, signature, signature_len));
 	OUT_BYTE_ARRAY(signature, signature_len);
 	END_CALL;
@@ -1904,11 +2042,20 @@ static CK_RV rpc_C_GenerateKey(CallState * cs)
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG count;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_GenerateKey);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ATTRIBUTE_ARRAY(template, count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = template;
+	authz_req.template_count = count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_GenerateKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, template, count, &key));
 	OUT_ULONG(key);
 	END_CALL;
@@ -1924,12 +2071,29 @@ static CK_RV rpc_C_GenerateKeyPair(CallState * cs)
 	CK_ULONG private_key_attribute_count;
 	CK_OBJECT_HANDLE public_key;
 	CK_OBJECT_HANDLE private_key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_GenerateKeyPair);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ATTRIBUTE_ARRAY(public_key_template, public_key_attribute_count);
 	IN_ATTRIBUTE_ARRAY(private_key_template, private_key_attribute_count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = public_key_template;
+	authz_req.template_count = public_key_attribute_count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_GenerateKeyPair, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = private_key_template;
+	authz_req.template_count = private_key_attribute_count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_GenerateKeyPair, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, public_key_template,
 		      public_key_attribute_count, private_key_template,
 		      private_key_attribute_count, &public_key, &private_key));
@@ -1947,6 +2111,7 @@ static CK_RV rpc_C_WrapKey(CallState * cs)
 	CK_OBJECT_HANDLE key;
 	CK_BYTE_PTR wrapped_key;
 	DECLARE_CK_ULONG_PTR(wrapped_key_len);
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_WrapKey);
 	IN_ULONG(session);
@@ -1954,6 +2119,22 @@ static CK_RV rpc_C_WrapKey(CallState * cs)
 	IN_ULONG(wrapping_key);
 	IN_ULONG(key);
 	IN_BYTE_BUFFER(wrapped_key, wrapped_key_len);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = wrapping_key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_WrapKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_WrapKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, wrapping_key, key, wrapped_key,
 		      wrapped_key_len));
 	OUT_BYTE_ARRAY(wrapped_key, wrapped_key_len);
@@ -1970,6 +2151,7 @@ static CK_RV rpc_C_UnwrapKey(CallState * cs)
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG attribute_count;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_UnwrapKey);
 	IN_ULONG(session);
@@ -1977,6 +2159,22 @@ static CK_RV rpc_C_UnwrapKey(CallState * cs)
 	IN_ULONG(unwrapping_key);
 	IN_BYTE_ARRAY(wrapped_key, wrapped_key_len);
 	IN_ATTRIBUTE_ARRAY(template, attribute_count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = unwrapping_key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_UnwrapKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = template;
+	authz_req.template_count = attribute_count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_UnwrapKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, unwrapping_key, wrapped_key,
 		      wrapped_key_len, template, attribute_count, &key));
 	OUT_ULONG(key);
@@ -1991,12 +2189,29 @@ static CK_RV rpc_C_DeriveKey(CallState * cs)
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG attribute_count;
 	CK_OBJECT_HANDLE key;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_DeriveKey);
 	IN_ULONG(session);
 	IN_MECHANISM(mechanism);
 	IN_ULONG(base_key);
 	IN_ATTRIBUTE_ARRAY(template, attribute_count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = base_key;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_DeriveKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = template;
+	authz_req.template_count = attribute_count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_DeriveKey, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, &mechanism, base_key, template, attribute_count,
 		      &key));
 	OUT_ULONG(key);
@@ -2056,6 +2271,10 @@ static int dispatch_call(CallState * cs)
 		gck_rpc_warn("couldn't prepare message");
 		return 0;
 	}
+
+	ret = gck_rpc_authz_check_basic(&cs->authz, req->call_id);
+	if (ret != CKR_OK)
+		goto done;
 
 	switch (req->call_id) {
 
@@ -2137,6 +2356,7 @@ static int dispatch_call(CallState * cs)
 		break;
 	};
 
+done:
 	if (ret == CKR_OK) {
 
 		/* Parsing errors? */
@@ -2273,6 +2493,8 @@ static void run_dispatch_loop(CallState *cs)
 		}
 	}
 
+	gck_rpc_authz_client_ctx_init(&cs->authz, cs->tls);
+
 	/* The client application */
 	if (! cs->read(cs, (unsigned char *)&cs->appid, sizeof (cs->appid))) {
 		gck_rpc_warn("Can't read appid\n");
@@ -2285,6 +2507,7 @@ static void run_dispatch_loop(CallState *cs)
 	/* Setup our buffers */
 	if (!call_init(cs)) {
 		gck_rpc_warn("out of memory");
+		gck_rpc_authz_client_ctx_free(&cs->authz);
 		return;
 	}
 
@@ -2476,6 +2699,8 @@ void gck_rpc_layer_inetd(CK_FUNCTION_LIST_PTR module)
    cs.write = &_inetd_write;
 
    pkcs11_module = module;
+   gck_rpc_authz_set_module(module);
+   gck_rpc_authz_init();
 
    run_dispatch_thread(&cs);
 }
@@ -2657,6 +2882,8 @@ int gck_rpc_layer_initialize(const char *prefix, CK_FUNCTION_LIST_PTR module)
 	gck_rpc_log("Listening on: %s\n", pkcs11_socket_path);
 
 	pkcs11_module = module;
+	gck_rpc_authz_set_module(module);
+	gck_rpc_authz_init();
 	pkcs11_socket = sock;
 	pkcs11_dispatchers = NULL;
 
@@ -2703,6 +2930,7 @@ void gck_rpc_layer_uninitialize(void)
 	pthread_mutex_unlock(&pkcs11_dispatchers_mutex);
 
 	pkcs11_module = NULL;
+	gck_rpc_authz_shutdown();
 }
 
 /*

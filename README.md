@@ -11,6 +11,17 @@ cmake . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
+## Documentation
+
+- `usecases.md` — real‑world scenarios and test mapping
+- `docs/ARCHITECTURE.md` — internal design and request flow
+- `docs/test-coverage.md` — coverage matrix with test links
+- `docs/per-client-identity.md` — per‑client authz details
+- `docs/security.md` — security notes
+- `mtls-demo/README.md` — NixOS mTLS demo
+- `SECURITY.md` — security policy
+- `TODO.md` — project roadmap
+
 ## Tests
 
 ### 1) Prepare SoftHSM2 token
@@ -108,6 +119,84 @@ export PKCS11_PROXY_TLS_VERIFY_PEER=true
 ```
 
 Then use `libpkcs11-proxy.so` as your PKCS#11 module.
+
+## Authorization (mTLS client identity)
+
+When mTLS is enabled and peer verification is enabled, the daemon can enforce a
+per-client authorization policy based on the authenticated client certificate.
+
+Environment variables:
+
+- `PKCS11_PROXY_AUTHZ_FILE=/path/to/authz.json` (required for enforce/audit)
+- `PKCS11_PROXY_AUTHZ_MODE=disabled|enforce|audit` (default: disabled)
+  - `disabled`: no authz checks
+  - `enforce`: deny operations not explicitly allowed
+  - `audit`: allow operations but log what would be denied
+- `PKCS11_PROXY_AUTHZ_DEFAULT=deny|allow` (default: deny when enforce/audit is active)
+- `PKCS11_PROXY_AUTHZ_LOG_LEVEL=info|debug` (optional, default: info)
+
+Notes:
+- In `enforce` mode, the daemon will deny requests if no verified peer
+  certificate is available (for example when `PKCS11_PROXY_TLS_VERIFY_PEER=false`).
+- Authorization is enforced server-side before forwarding requests to the
+  underlying PKCS#11 module.
+ - For a deeper internal overview, see `docs/ARCHITECTURE.md`.
+
+Troubleshooting:
+- `CKR_GENERAL_ERROR` on `C_Initialize`: check daemon logs for `AUTHZ DENY` to
+  confirm policy is blocking the call.
+- `AUTHZ: failed to load policy file`: verify the file exists in the daemon
+  environment and the JSON is valid.
+- TLS verify errors: ensure the client connects using a hostname that matches
+  the server certificate SAN.
+- Enumeration or login hangs: check daemon logs for repeated `AUTHZ DENY` lines
+  and add the missing PKCS#11 functions to the allow list (common ones include
+  `C_GetSessionInfo`, `C_GetMechanismList`, and `C_GenerateRandom`).
+
+### Policy format (JSON)
+
+Example `authz.json`:
+
+```json
+{
+  "version": 1,
+  "default": "deny",
+  "clients": [
+    {
+      "id_type": "cert_fingerprint_sha256",
+      "id": "ab12...ff",
+      "allow": {
+        "pkcs11_functions": [
+          "C_Initialize","C_Finalize","C_GetInfo","C_GetSlotList","C_GetSlotInfo",
+          "C_GetTokenInfo","C_OpenSession","C_CloseSession","C_Login","C_Logout",
+          "C_FindObjectsInit","C_FindObjects","C_FindObjectsFinal",
+          "C_GetAttributeValue","C_SignInit","C_Sign"
+        ],
+        "tokens": ["ProxyTestToken"],
+        "objects": ["ProxyTestExistingECKey","LeafKey-*"]
+      }
+    },
+    {
+      "id_type": "subject_cn",
+      "id": "jenkins-prod-runner-*",
+      "allow": {
+        "pkcs11_functions": [
+          "C_Initialize","C_Finalize","C_GetInfo","C_GetSlotList","C_GetSlotInfo",
+          "C_GetTokenInfo","C_OpenSession","C_CloseSession","C_Login","C_Logout"
+        ],
+        "tokens": ["ProxyTestToken"]
+      }
+    }
+  ]
+}
+```
+
+Matching rules:
+- `cert_fingerprint_sha256`: exact match (preferred)
+- `subject_cn`: glob match on subject CN
+- `san_uri`: glob match on SAN URI entries
+- If multiple entries match, their `allow` rules are unioned.
+- If no entry matches, the policy `default` applies.
 
 ## OpenSSL 3 provider (client-side)
 
