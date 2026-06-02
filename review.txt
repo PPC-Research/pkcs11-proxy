@@ -1,0 +1,29 @@
+Codex review
+This patch introduces a few regressions in authz and TLS initialization that look worth fixing before merge. The most serious issue is that scoped authz checks can be bypassed because module state is cleared during authz initialization; there are also two correctness problems where valid configurations can stop matching or reinitialize in the wrong TLS mode. I left line-specific comments with the concrete failure modes and suggested areas to address.
+
+gck-rpc-authz.c (1249-1252):
+P1: Preserve the PKCS#11 module pointer during authz init
+
+In gck-rpc-authz.c:1252, gck_rpc_authz_init() clears authz_state with memset(), which also wipes authz_state.module that was just set by gck_rpc_authz_set_module().
+
+As a result, later lookups in authz_token_label_from_session(), authz_token_label_from_slot(), and authz_label_from_object() return NULL, so token/object-scoped policy checks silently degrade to function-only checks. That means operations such as C_SignInit on a disallowed key label can be allowed instead of denied.
+
+authz-policy-parser.c (93-96):
+P2: Stop rewriting UTF-8 policy values before parsing
+
+In authz-policy-parser.c:96, the sanitizer replaces every byte >= 0x80 with a space before parsing. JSON strings are UTF-8, so this corrupts valid non-ASCII token labels, object labels, subject CNs, and SAN URIs in authz policies. Those values then fail to match at runtime, which can effectively fall back to the default allow/deny behavior for affected clients.
+
+
+gck-rpc-module.c (1562):
+P2: Clear cached TLS mode inputs before reinitializing the module
+
+In gck-rpc-module.c:1560, TLS mode selection now depends on cached tls_* globals, but those globals are not cleared on C_Finalize or after a failed initialization. If the process is initialized once in certificate mode and later reinitialized for PSK without explicitly forcing tls_mode=psk, resolve_tls_mode() can still see the stale certificate settings and choose certificate mode. That makes a valid reinitialization sequence fail or use the wrong TLS configuration.
+
+
+extra:
+
+I see at least two more issues that are worth treating as real findings.
+
+Token/object scoping is not enforced on several allowed operations. The new scoped check is only wired into a subset of calls. C_GetTokenInfo and C_OpenSession never call gck_rpc_authz_check_scoped(), and object/session enumeration calls like C_GetAttributeValue and C_FindObjectsInit also skip it. That means a client whose rule allows those functions with tokens or objects restrictions can still open sessions on other tokens, enumerate objects there, and read attributes from objects outside its allowed scope. Relevant sites: gck-rpc-dispatch.c:1027, gck-rpc-dispatch.c:1105, gck-rpc-dispatch.c:1413, gck-rpc-dispatch.c:1444.
+Escaped Unicode in valid JSON policy strings still will not match. Even aside from the >= 0x80 sanitizer, the parser copies raw JSMN string slices without unescaping them. So a policy written with standard JSON escapes like "\u00e4" will be stored literally as backslash-u text and never match the actual UTF-8 token/object/CN/SAN value at runtime. That affects the active parser path in authz-policy-parser.c:360.
+SAN DNS/URI extraction assumes NUL-terminated ASN.1 strings. authz_client_from_cert() passes OpenSSL ASN1_IA5STRING->data straight into strdup() via authz_add_string(). Those buffers are length-delimited, not guaranteed NUL-terminated, so SAN matching can read past the ASN.1 buffer and misparse or overread certificate data. Relevant sites: gck-rpc-authz.c:649, gck-rpc-authz.c:1410.

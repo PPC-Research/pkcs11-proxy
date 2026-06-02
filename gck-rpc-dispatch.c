@@ -1028,11 +1028,18 @@ static CK_RV rpc_C_GetTokenInfo(CallState * cs)
 {
 	CK_SLOT_ID slot_id;
 	CK_TOKEN_INFO info;
+	GckRpcAuthzRequest authz_req;
 
 	/* Slot id becomes appartment so lower layers can tell clients apart. */
 
 	BEGIN_CALL(C_GetTokenInfo);
 	IN_ULONG(slot_id);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_slot = 1;
+	authz_req.slot_id = slot_id;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_GetTokenInfo, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((slot_id, &info));
 	OUT_TOKEN_INFO(info);
 	END_CALL;
@@ -1107,12 +1114,19 @@ static CK_RV rpc_C_OpenSession(CallState * cs)
 	CK_SLOT_ID slot_id;
 	CK_FLAGS flags;
 	CK_SESSION_HANDLE session;
+	GckRpcAuthzRequest authz_req;
 
 	/* Slot id becomes appartment so lower layers can tell clients apart. */
 
 	BEGIN_CALL(C_OpenSession);
 	IN_ULONG(slot_id);
 	IN_ULONG(flags);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_slot = 1;
+	authz_req.slot_id = slot_id;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_OpenSession, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((slot_id, flags, NULL, NULL, &session));
 	if (_ret == CKR_OK) {
 		int i;
@@ -1416,11 +1430,20 @@ static CK_RV rpc_C_GetAttributeValue(CallState * cs)
 	CK_OBJECT_HANDLE object;
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG count;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_GetAttributeValue);
 	IN_ULONG(session);
 	IN_ULONG(object);
 	IN_ATTRIBUTE_BUFFER(template, count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.has_object = 1;
+	authz_req.object = object;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_GetAttributeValue, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, object, template, count));
 	OUT_ATTRIBUTE_ARRAY(template, count);
 	END_CALL;
@@ -1446,10 +1469,19 @@ static CK_RV rpc_C_FindObjectsInit(CallState * cs)
 	CK_SESSION_HANDLE session;
 	CK_ATTRIBUTE_PTR template;
 	CK_ULONG count;
+	GckRpcAuthzRequest authz_req;
 
 	BEGIN_CALL(C_FindObjectsInit);
 	IN_ULONG(session);
 	IN_ATTRIBUTE_ARRAY(template, count);
+	memset(&authz_req, 0, sizeof(authz_req));
+	authz_req.has_session = 1;
+	authz_req.session = session;
+	authz_req.template = template;
+	authz_req.template_count = count;
+	_ret = gck_rpc_authz_check_scoped(&cs->authz, GCK_RPC_CALL_C_FindObjectsInit, &authz_req);
+	if (_ret != CKR_OK)
+		goto _cleanup;
 	PROCESS_CALL((session, template, count));
 	END_CALL;
 }

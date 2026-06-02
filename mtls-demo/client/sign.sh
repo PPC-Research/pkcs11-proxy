@@ -19,11 +19,18 @@ export PKCS11_PROVIDER_MODULE="$proxy_lib"
 
 msg="${1:-Hello from pkcs11-proxy mTLS demo}"
 work_dir="${2:-/tmp}"
+pin="${PKCS11_PROXY_PIN:-1234}"
 
 printf "%s" "$msg" > "$work_dir/message.bin"
 
+passin_args=()
+if [ -n "$pin" ]; then
+  passin_args=(-passin "pass:$pin")
+fi
+
 openssl pkeyutl -sign -provider pkcs11 -provider default \
   -inkey "pkcs11:token=ProxyTestToken;object=ProxyTestExistingECKey;type=private" \
+  "${passin_args[@]}" \
   -in "$work_dir/message.bin" -out "$work_dir/signature.bin"
 
 echo "Signature written to $work_dir/signature.bin"

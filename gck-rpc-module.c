@@ -81,6 +81,19 @@ static char tls_mode_name[16] = { 0, };
 static int tls_verify_peer_set = 0;
 static bool tls_verify_peer = true;
 
+static void clear_cached_tls_inputs(void)
+{
+	tls_psk_key_filename[0] = 0;
+	tls_cert_file[0] = 0;
+	tls_key_file[0] = 0;
+	tls_ca_file[0] = 0;
+	tls_ca_path[0] = 0;
+	tls_crl_file[0] = 0;
+	tls_mode_name[0] = 0;
+	tls_verify_peer_set = 0;
+	tls_verify_peer = true;
+}
+
 /* The error used by us when parsing of rpc message fails */
 #define PARSE_ERROR   CKR_DEVICE_ERROR
 
@@ -1629,16 +1642,17 @@ static CK_RV rpc_C_Initialize(CK_VOID_PTR init_args)
 		call_done(cs, ret);
 	}
 
-done:
-	/* Mark us as officially initialized */
-	if (ret == CKR_OK) {
-		pkcs11_initialized = 1;
-		pkcs11_initialized_pid = pid;
-	} else if (ret != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
-		pkcs11_initialized = 0;
-		pkcs11_initialized_pid = 0;
-		pkcs11_socket_path[0] = 0;
-	}
+	done:
+		/* Mark us as officially initialized */
+		if (ret == CKR_OK) {
+			pkcs11_initialized = 1;
+			pkcs11_initialized_pid = pid;
+		} else if (ret != CKR_CRYPTOKI_ALREADY_INITIALIZED) {
+			pkcs11_initialized = 0;
+			pkcs11_initialized_pid = 0;
+			pkcs11_socket_path[0] = 0;
+			clear_cached_tls_inputs();
+		}
 
 	pthread_mutex_unlock(&init_mutex);
 
@@ -1681,6 +1695,7 @@ static CK_RV rpc_C_Finalize(CK_VOID_PTR reserved)
 	pkcs11_initialized = 0;
 	pkcs11_initialized_pid = 0;
 	pkcs11_socket_path[0] = 0;
+	clear_cached_tls_inputs();
 
 	pthread_mutex_unlock(&init_mutex);
 

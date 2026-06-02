@@ -181,9 +181,151 @@ static void authz_sanitize_control_chars(char *buf, size_t len)
 		unsigned char c = (unsigned char)buf[i];
 		if (c < 0x20 && c != '\n' && c != '\r' && c != '\t')
 			buf[i] = ' ';
-		else if (c >= 0x80)
-			buf[i] = ' ';
 	}
+}
+
+static int authz_hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return 10 + (c - 'a');
+	if (c >= 'A' && c <= 'F')
+		return 10 + (c - 'A');
+	return -1;
+}
+
+static int authz_append_utf8(char **buf, size_t *len, size_t *cap, uint32_t cp)
+{
+	unsigned char tmp[4];
+	size_t n = 0;
+
+	if (cp <= 0x7F) {
+		tmp[n++] = (unsigned char)cp;
+	} else if (cp <= 0x7FF) {
+		tmp[n++] = (unsigned char)(0xC0 | (cp >> 6));
+		tmp[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+	} else if (cp <= 0xFFFF) {
+		tmp[n++] = (unsigned char)(0xE0 | (cp >> 12));
+		tmp[n++] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+		tmp[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+	} else if (cp <= 0x10FFFF) {
+		tmp[n++] = (unsigned char)(0xF0 | (cp >> 18));
+		tmp[n++] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+		tmp[n++] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+		tmp[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+	} else {
+		tmp[n++] = 0xEF;
+		tmp[n++] = 0xBF;
+		tmp[n++] = 0xBD;
+	}
+
+	if (*len + n + 1 > *cap) {
+		size_t new_cap = *cap ? *cap : 32;
+		while (*len + n + 1 > new_cap)
+			new_cap *= 2;
+		char *tmpbuf = realloc(*buf, new_cap);
+		if (!tmpbuf)
+			return 0;
+		*buf = tmpbuf;
+		*cap = new_cap;
+	}
+
+	memcpy(*buf + *len, tmp, n);
+	*len += n;
+	(*buf)[*len] = '\0';
+	return 1;
+}
+
+static char *authz_json_unescape(const char *in, size_t in_len)
+{
+	size_t cap = in_len + 1;
+	size_t out_len = 0;
+	char *out;
+	size_t i = 0;
+
+	out = calloc(1, cap);
+	if (!out)
+		return NULL;
+
+	while (i < in_len) {
+		unsigned char c = (unsigned char)in[i++];
+		if (c != '\\') {
+			if (out_len + 2 > cap) {
+				size_t new_cap = cap * 2;
+				char *tmp = realloc(out, new_cap);
+				if (!tmp) {
+					free(out);
+					return NULL;
+				}
+				out = tmp;
+				cap = new_cap;
+			}
+			out[out_len++] = (char)c;
+			out[out_len] = '\0';
+			continue;
+		}
+
+		if (i >= in_len) {
+			(void)authz_append_utf8(&out, &out_len, &cap, 0xFFFD);
+			break;
+		}
+
+		c = (unsigned char)in[i++];
+		switch (c) {
+		case '"':  (void)authz_append_utf8(&out, &out_len, &cap, '"'); break;
+		case '\\': (void)authz_append_utf8(&out, &out_len, &cap, '\\'); break;
+		case '/':  (void)authz_append_utf8(&out, &out_len, &cap, '/'); break;
+		case 'b':  (void)authz_append_utf8(&out, &out_len, &cap, '\b'); break;
+		case 'f':  (void)authz_append_utf8(&out, &out_len, &cap, '\f'); break;
+		case 'n':  (void)authz_append_utf8(&out, &out_len, &cap, '\n'); break;
+		case 'r':  (void)authz_append_utf8(&out, &out_len, &cap, '\r'); break;
+		case 't':  (void)authz_append_utf8(&out, &out_len, &cap, '\t'); break;
+		case 'u': {
+			uint32_t cp;
+			int h1, h2, h3, h4;
+
+			if (i + 3 >= in_len) {
+				(void)authz_append_utf8(&out, &out_len, &cap, 0xFFFD);
+				i = in_len;
+				break;
+			}
+
+			h1 = authz_hexval(in[i]); h2 = authz_hexval(in[i + 1]);
+			h3 = authz_hexval(in[i + 2]); h4 = authz_hexval(in[i + 3]);
+			i += 4;
+			if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) {
+				(void)authz_append_utf8(&out, &out_len, &cap, 0xFFFD);
+				break;
+			}
+			cp = (uint32_t)((h1 << 12) | (h2 << 8) | (h3 << 4) | h4);
+
+			if (cp >= 0xD800 && cp <= 0xDBFF) {
+				if (i + 5 < in_len && in[i] == '\\' && in[i + 1] == 'u') {
+					int l1, l2, l3, l4;
+					uint32_t low;
+					l1 = authz_hexval(in[i + 2]); l2 = authz_hexval(in[i + 3]);
+					l3 = authz_hexval(in[i + 4]); l4 = authz_hexval(in[i + 5]);
+					if (l1 >= 0 && l2 >= 0 && l3 >= 0 && l4 >= 0) {
+						low = (uint32_t)((l1 << 12) | (l2 << 8) | (l3 << 4) | l4);
+						if (low >= 0xDC00 && low <= 0xDFFF) {
+							i += 6;
+							cp = 0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+						}
+					}
+				}
+			}
+
+			(void)authz_append_utf8(&out, &out_len, &cap, cp);
+			break;
+		}
+		default:
+			(void)authz_append_utf8(&out, &out_len, &cap, c);
+			break;
+		}
+	}
+
+	return out;
 }
 
 static void authz_log_json_snippet(const char *label, const char *buf, size_t len)
@@ -306,9 +448,37 @@ static const char *authz_parse_string_literal(const char *p, const char *end, ch
 			case 'r': c = '\r'; break;
 			case 't': c = '\t'; break;
 			case 'u':
-				/* Skip \uXXXX */
-				if (p + 3 < end)
+				if (p + 3 < end) {
+					int h1 = authz_hexval(p[0]);
+					int h2 = authz_hexval(p[1]);
+					int h3 = authz_hexval(p[2]);
+					int h4 = authz_hexval(p[3]);
+					uint32_t cp = 0xFFFD;
 					p += 4;
+
+					if (h1 >= 0 && h2 >= 0 && h3 >= 0 && h4 >= 0)
+						cp = (uint32_t)((h1 << 12) | (h2 << 8) | (h3 << 4) | h4);
+
+					if (cp >= 0xD800 && cp <= 0xDBFF && p + 5 < end && p[0] == '\\' && p[1] == 'u') {
+						int l1 = authz_hexval(p[2]);
+						int l2 = authz_hexval(p[3]);
+						int l3 = authz_hexval(p[4]);
+						int l4 = authz_hexval(p[5]);
+						if (l1 >= 0 && l2 >= 0 && l3 >= 0 && l4 >= 0) {
+							uint32_t low = (uint32_t)((l1 << 12) | (l2 << 8) | (l3 << 4) | l4);
+							if (low >= 0xDC00 && low <= 0xDFFF) {
+								p += 6;
+								cp = 0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+							}
+						}
+					}
+
+					if (!authz_append_utf8(&buf, &len, &cap, cp)) {
+						free(buf);
+						return NULL;
+					}
+					continue;
+				}
 				c = '?';
 				break;
 			default:
@@ -561,16 +731,10 @@ static int authz_token_eq(const char *json, const jsmntok_t *tok, const char *st
 static char *authz_token_strdup(const char *json, const jsmntok_t *tok)
 {
 	size_t len;
-	char *out;
 	if (tok->type != JSMN_STRING)
 		return NULL;
 	len = (size_t)(tok->end - tok->start);
-	out = calloc(1, len + 1);
-	if (!out)
-		return NULL;
-	memcpy(out, json + tok->start, len);
-	out[len] = '\0';
-	return out;
+	return authz_json_unescape(json + tok->start, len);
 }
 
 static int authz_token_to_int(const char *json, const jsmntok_t *tok, int *value)
@@ -656,6 +820,31 @@ static int authz_add_string(char ***list, size_t *count, const char *value)
 	copy = strdup(value);
 	if (!copy)
 		return 0;
+	tmp = realloc(*list, sizeof(char *) * (*count + 1));
+	if (!tmp) {
+		free(copy);
+		return 0;
+	}
+	tmp[*count] = copy;
+	*list = tmp;
+	*count += 1;
+	return 1;
+}
+
+static int authz_add_string_len(char ***list, size_t *count, const unsigned char *data, size_t len)
+{
+	char **tmp;
+	char *copy;
+
+	if (!data)
+		return 0;
+
+	copy = calloc(1, len + 1);
+	if (!copy)
+		return 0;
+	memcpy(copy, data, len);
+	copy[len] = '\0';
+
 	tmp = realloc(*list, sizeof(char *) * (*count + 1));
 	if (!tmp) {
 		free(copy);
@@ -830,7 +1019,7 @@ static int authz_parse_clients(const char *json, const jsmntok_t *tokens, int in
 	return 1;
 }
 
-static AuthzPolicy *authz_policy_load(const char *path)
+	static __attribute__((unused)) AuthzPolicy *authz_policy_load(const char *path)
 {
 	AuthzPolicy *policy;
 	char *json;
@@ -1120,6 +1309,8 @@ static char *authz_token_label_from_session(CK_SESSION_HANDLE session)
 		else
 			break;
 	}
+	if (label[0] == '\0')
+		return NULL;
 	return strdup(label);
 }
 
@@ -1143,6 +1334,8 @@ static char *authz_token_label_from_slot(CK_SLOT_ID slot_id)
 		else
 			break;
 	}
+	if (label[0] == '\0')
+		return NULL;
 	return strdup(label);
 }
 
@@ -1248,8 +1441,10 @@ int gck_rpc_authz_init(void)
 	const char *default_action = authz_getenv("PKCS11_PROXY_AUTHZ_DEFAULT");
 	const char *log_level = authz_getenv("PKCS11_PROXY_AUTHZ_LOG_LEVEL");
 	int default_set = 0;
+	CK_FUNCTION_LIST_PTR module = authz_state.module;
 
 	memset(&authz_state, 0, sizeof(authz_state));
+	authz_state.module = module;
 	authz_state.mode = GCK_RPC_AUTHZ_MODE_DISABLED;
 	authz_state.default_allow = 0;
 
@@ -1410,11 +1605,13 @@ static GckRpcAuthzClient *authz_client_from_cert(X509 *cert, int verified)
 			if (name->type == GEN_DNS) {
 				ASN1_IA5STRING *dns = name->d.dNSName;
 				if (dns && dns->data)
-					authz_add_string(&client->san_dns, &client->san_dns_count, (char *)dns->data);
+					authz_add_string_len(&client->san_dns, &client->san_dns_count,
+							    dns->data, (size_t)dns->length);
 			} else if (name->type == GEN_URI) {
 				ASN1_IA5STRING *uri = name->d.uniformResourceIdentifier;
 				if (uri && uri->data)
-					authz_add_string(&client->san_uri, &client->san_uri_count, (char *)uri->data);
+					authz_add_string_len(&client->san_uri, &client->san_uri_count,
+							    uri->data, (size_t)uri->length);
 			} else if (name->type == GEN_IPADD) {
 				ASN1_OCTET_STRING *ip = name->d.iPAddress;
 				if (ip && ip->data)

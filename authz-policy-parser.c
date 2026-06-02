@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
 
 #include "jsmn.h"
 
@@ -93,9 +94,151 @@ static void sanitize_control_chars(char *buf, size_t len)
 		unsigned char c = (unsigned char)buf[i];
 		if (c < 0x20 && c != '\n' && c != '\r' && c != '\t')
 			buf[i] = ' ';
-		else if (c >= 0x80)
-			buf[i] = ' ';
 	}
+}
+
+static int hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return 10 + (c - 'a');
+	if (c >= 'A' && c <= 'F')
+		return 10 + (c - 'A');
+	return -1;
+}
+
+static int append_utf8(char **buf, size_t *len, size_t *cap, uint32_t cp)
+{
+	unsigned char tmp[4];
+	size_t n = 0;
+
+	if (cp <= 0x7F) {
+		tmp[n++] = (unsigned char)cp;
+	} else if (cp <= 0x7FF) {
+		tmp[n++] = (unsigned char)(0xC0 | (cp >> 6));
+		tmp[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+	} else if (cp <= 0xFFFF) {
+		tmp[n++] = (unsigned char)(0xE0 | (cp >> 12));
+		tmp[n++] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+		tmp[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+	} else if (cp <= 0x10FFFF) {
+		tmp[n++] = (unsigned char)(0xF0 | (cp >> 18));
+		tmp[n++] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+		tmp[n++] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+		tmp[n++] = (unsigned char)(0x80 | (cp & 0x3F));
+	} else {
+		tmp[n++] = 0xEF;
+		tmp[n++] = 0xBF;
+		tmp[n++] = 0xBD;
+	}
+
+	if (*len + n + 1 > *cap) {
+		size_t new_cap = *cap ? *cap : 32;
+		while (*len + n + 1 > new_cap)
+			new_cap *= 2;
+		char *tmpbuf = realloc(*buf, new_cap);
+		if (!tmpbuf)
+			return 0;
+		*buf = tmpbuf;
+		*cap = new_cap;
+	}
+
+	memcpy(*buf + *len, tmp, n);
+	*len += n;
+	(*buf)[*len] = '\0';
+	return 1;
+}
+
+static char *json_unescape(const char *in, size_t in_len)
+{
+	size_t cap = in_len + 1;
+	size_t out_len = 0;
+	char *out;
+	size_t i = 0;
+
+	out = calloc(1, cap);
+	if (!out)
+		return NULL;
+
+	while (i < in_len) {
+		unsigned char c = (unsigned char)in[i++];
+		if (c != '\\') {
+			if (out_len + 2 > cap) {
+				size_t new_cap = cap * 2;
+				char *tmp = realloc(out, new_cap);
+				if (!tmp) {
+					free(out);
+					return NULL;
+				}
+				out = tmp;
+				cap = new_cap;
+			}
+			out[out_len++] = (char)c;
+			out[out_len] = '\0';
+			continue;
+		}
+
+		if (i >= in_len) {
+			(void)append_utf8(&out, &out_len, &cap, 0xFFFD);
+			break;
+		}
+
+		c = (unsigned char)in[i++];
+		switch (c) {
+		case '"':  (void)append_utf8(&out, &out_len, &cap, '"'); break;
+		case '\\': (void)append_utf8(&out, &out_len, &cap, '\\'); break;
+		case '/':  (void)append_utf8(&out, &out_len, &cap, '/'); break;
+		case 'b':  (void)append_utf8(&out, &out_len, &cap, '\b'); break;
+		case 'f':  (void)append_utf8(&out, &out_len, &cap, '\f'); break;
+		case 'n':  (void)append_utf8(&out, &out_len, &cap, '\n'); break;
+		case 'r':  (void)append_utf8(&out, &out_len, &cap, '\r'); break;
+		case 't':  (void)append_utf8(&out, &out_len, &cap, '\t'); break;
+		case 'u': {
+			uint32_t cp;
+			int h1, h2, h3, h4;
+
+			if (i + 3 >= in_len) {
+				(void)append_utf8(&out, &out_len, &cap, 0xFFFD);
+				i = in_len;
+				break;
+			}
+
+			h1 = hexval(in[i]); h2 = hexval(in[i + 1]);
+			h3 = hexval(in[i + 2]); h4 = hexval(in[i + 3]);
+			i += 4;
+			if (h1 < 0 || h2 < 0 || h3 < 0 || h4 < 0) {
+				(void)append_utf8(&out, &out_len, &cap, 0xFFFD);
+				break;
+			}
+			cp = (uint32_t)((h1 << 12) | (h2 << 8) | (h3 << 4) | h4);
+
+			if (cp >= 0xD800 && cp <= 0xDBFF) {
+				if (i + 5 < in_len && in[i] == '\\' && in[i + 1] == 'u') {
+					int l1, l2, l3, l4;
+					uint32_t low;
+					l1 = hexval(in[i + 2]); l2 = hexval(in[i + 3]);
+					l3 = hexval(in[i + 4]); l4 = hexval(in[i + 5]);
+					if (l1 >= 0 && l2 >= 0 && l3 >= 0 && l4 >= 0) {
+						low = (uint32_t)((l1 << 12) | (l2 << 8) | (l3 << 4) | l4);
+						if (low >= 0xDC00 && low <= 0xDFFF) {
+							i += 6;
+							cp = 0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+						}
+					}
+				}
+			}
+
+			(void)append_utf8(&out, &out_len, &cap, cp);
+			break;
+		}
+		default:
+			(void)append_utf8(&out, &out_len, &cap, c);
+			break;
+		}
+	}
+
+	return out;
 }
 
 static const char *skip_ws_range(const char *p, const char *end)
@@ -138,8 +281,34 @@ static const char *parse_string_literal(const char *p, const char *end, char **o
 			case 'r': c = '\r'; break;
 			case 't': c = '\t'; break;
 			case 'u':
-				if (p + 3 < end)
+				if (p + 3 < end) {
+					int h1 = hexval(p[0]);
+					int h2 = hexval(p[1]);
+					int h3 = hexval(p[2]);
+					int h4 = hexval(p[3]);
+					uint32_t cp = 0xFFFD;
 					p += 4;
+					if (h1 >= 0 && h2 >= 0 && h3 >= 0 && h4 >= 0)
+						cp = (uint32_t)((h1 << 12) | (h2 << 8) | (h3 << 4) | h4);
+					if (cp >= 0xD800 && cp <= 0xDBFF && p + 5 < end && p[0] == '\\' && p[1] == 'u') {
+						int l1 = hexval(p[2]);
+						int l2 = hexval(p[3]);
+						int l3 = hexval(p[4]);
+						int l4 = hexval(p[5]);
+						if (l1 >= 0 && l2 >= 0 && l3 >= 0 && l4 >= 0) {
+							uint32_t low = (uint32_t)((l1 << 12) | (l2 << 8) | (l3 << 4) | l4);
+							if (low >= 0xDC00 && low <= 0xDFFF) {
+								p += 6;
+								cp = 0x10000 + (((cp - 0xD800) << 10) | (low - 0xDC00));
+							}
+						}
+					}
+					if (!append_utf8(&buf, &len, &cap, cp)) {
+						free(buf);
+						return NULL;
+					}
+					continue;
+				}
 				c = '?';
 				break;
 			default:
@@ -360,16 +529,10 @@ static int token_eq(const char *json, const jsmntok_t *tok, const char *str)
 static char *token_strdup(const char *json, const jsmntok_t *tok)
 {
 	size_t len;
-	char *out;
 	if (tok->type != JSMN_STRING)
 		return NULL;
 	len = (size_t)(tok->end - tok->start);
-	out = calloc(1, len + 1);
-	if (!out)
-		return NULL;
-	memcpy(out, json + tok->start, len);
-	out[len] = '\0';
-	return out;
+	return json_unescape(json + tok->start, len);
 }
 
 static int token_to_int(const char *json, const jsmntok_t *tok, int *value)
