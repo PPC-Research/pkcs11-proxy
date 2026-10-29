@@ -1644,17 +1644,19 @@ void gck_rpc_authz_client_ctx_init(GckRpcAuthzClientCtx *ctx, GckRpcTlsState *tl
 
 	{
 		long verify_result = SSL_get_verify_result(tls->ssl);
-		int verified = (verify_result == X509_V_OK);
+		int verification_requested = (SSL_get_verify_mode(tls->ssl) & SSL_VERIFY_PEER) != 0;
+		int verified = verification_requested && (verify_result == X509_V_OK);
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
 		X509 *peer = SSL_get1_peer_certificate(tls->ssl);
 #else
 		X509 *peer = SSL_get_peer_certificate(tls->ssl);
 #endif
+		int has_peer = (peer != NULL);
 		if (peer) {
 			ctx->client = authz_client_from_cert(peer, verified);
 			X509_free(peer);
 		}
-		if (authz_state.mode == GCK_RPC_AUTHZ_MODE_ENFORCE && !verified) {
+		if (authz_state.mode == GCK_RPC_AUTHZ_MODE_ENFORCE && (!has_peer || !verified)) {
 			ctx->deny_all = 1;
 			ctx->deny_all_peer = 1;
 		}

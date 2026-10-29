@@ -558,12 +558,21 @@ static int skip_token(const jsmntok_t *tokens, int index)
 {
 	int i;
 	int skipped = 1;
-	if (tokens[index].type == JSMN_OBJECT || tokens[index].type == JSMN_ARRAY) {
+	int idx = index + 1;
+	if (tokens[index].type == JSMN_OBJECT) {
 		for (i = 0; i < tokens[index].size; i++) {
-			int child = index + skipped;
-			skipped += skip_token(tokens, child);
-			if (tokens[index].type == JSMN_OBJECT)
-				i++;
+			int child_skipped = skip_token(tokens, idx);
+			skipped += child_skipped;
+			idx += child_skipped;
+			child_skipped = skip_token(tokens, idx);
+			skipped += child_skipped;
+			idx += child_skipped;
+		}
+	} else if (tokens[index].type == JSMN_ARRAY) {
+		for (i = 0; i < tokens[index].size; i++) {
+			int child_skipped = skip_token(tokens, idx);
+			skipped += child_skipped;
+			idx += child_skipped;
 		}
 	}
 	return skipped;

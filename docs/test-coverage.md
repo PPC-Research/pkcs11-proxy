@@ -11,7 +11,7 @@ This document maps real‑world scenarios and requirements to concrete tests.
 | Enumeration allowed, keygen denied | Read‑only client can enumerate but cannot generate keys | `tests/per_client_identity.py::test_mtls_authz_allows_enumeration_but_denies_keygen` |
 | Default deny when no match | No client match ⇒ deny | `tests/per_client_identity.py::test_authz_default_deny_no_match` |
 | Audit mode logs only | Operation succeeds; audit log produced | `tests/per_client_identity.py::test_authz_audit_mode_logs_only` |
-| Enforce requires verified peer cert | Enforce mode denies without verified peer | `tests/per_client_identity.py::test_authz_requires_peer_cert_when_enforced` |
+| Enforce requires verified peer cert | Enforce mode denies unverified or missing peer certs | `tests/per_client_identity.py::test_authz_enforce_denies_unverified_peer_cert_even_when_default_allow`, `tests/per_client_identity.py::test_authz_enforce_denies_missing_peer_cert_even_when_default_allow` |
 | Object label scoping | Access to non‑matching key labels is denied | `tests/per_client_identity.py::test_authz_object_label_scoping_denies_other_key` |
 | Two clients, different perms | Positive + negative paths for two certs | `tests/per_client_identity.py::test_authz_two_clients_different_permissions` |
 | Untrusted CA | Client cert signed by other CA denied | `tests/per_client_identity.py::test_authz_denies_untrusted_ca_and_self_signed` |

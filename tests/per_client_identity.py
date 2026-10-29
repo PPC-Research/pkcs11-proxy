@@ -3,6 +3,8 @@ import json
 import os
 import random
 import shutil
+import ssl
+import struct
 import subprocess
 import socket
 import tempfile
@@ -222,6 +224,39 @@ def _wait_for_daemon(daemon_process, log_path, proxy_socket):
             logs = lf.read()
         pytest.fail(f"pkcs11-daemon exited early. Logs:\\n{logs}")
     pytest.fail("pkcs11-daemon did not become ready in time")
+
+
+def _read_exact(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def _send_initialize_request_without_client_cert(port, ca_file):
+    context = ssl.create_default_context(cafile=ca_file)
+    context.check_hostname = False
+    with socket.create_connection(("127.0.0.1", port), timeout=3.0) as raw:
+        with context.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+            handshake = b"PRIVATE-GNOME-KEYRING-PKCS11-PROTOCOL-V-3"
+            request = (
+                struct.pack(">I", 1)
+                + struct.pack(">I", 2)
+                + b"ay"
+                + struct.pack(">I", len(handshake))
+                + handshake
+            )
+            tls.sendall(struct.pack(">Q", 1))
+            tls.sendall(struct.pack(">I", len(request)) + request)
+            response_len = _read_exact(tls, 4)
+            assert len(response_len) == 4
+            response = _read_exact(tls, struct.unpack(">I", response_len)[0])
+            assert len(response) >= 12
+            assert struct.unpack(">I", response[:4])[0] == 0
+            assert struct.unpack(">Q", response[4:12])[0] != 0
 
 
 def _ensure_softhsm_conf():
@@ -633,7 +668,7 @@ def test_authz_audit_mode_logs_only():
         shutil.rmtree(mtls["temp_dir"], ignore_errors=True)
 
 
-def test_authz_requires_peer_cert_when_enforced():
+def test_authz_enforce_denies_unverified_peer_cert_even_when_default_allow():
     if not os.getenv("PKCS11_TEST_MTLS"):
         pytest.skip("mTLS not enabled")
     if not _pkcs11_tool_available():
@@ -646,7 +681,7 @@ def test_authz_requires_peer_cert_when_enforced():
     authz_path = os.path.join(mtls["temp_dir"], "authz.json")
     clientA = mtls["clients"]["clientA"]
 
-    policy = {"version": 1, "default": "deny", "clients": []}
+    policy = {"version": 1, "default": "allow", "clients": []}
     with open(authz_path, "w") as f:
         json.dump(policy, f)
 
@@ -660,7 +695,7 @@ def test_authz_requires_peer_cert_when_enforced():
         "PKCS11_PROXY_TLS_VERIFY_PEER": "false",
         "PKCS11_PROXY_AUTHZ_MODE": "enforce",
         "PKCS11_PROXY_AUTHZ_FILE": authz_path,
-        "PKCS11_PROXY_AUTHZ_DEFAULT": "deny",
+        "PKCS11_PROXY_AUTHZ_DEFAULT": "allow",
     }
 
     log_path = os.path.join(mtls["temp_dir"], "daemon.log")
@@ -679,6 +714,45 @@ def test_authz_requires_peer_cert_when_enforced():
         }
         result = _run_cmd(["pkcs11-tool", "--module", proxy_lib, "-L"], env=client_env)
         assert result.returncode != 0
+    finally:
+        _terminate_daemon(daemon_process)
+        log_file.close()
+        shutil.rmtree(mtls["temp_dir"], ignore_errors=True)
+
+
+def test_authz_enforce_denies_missing_peer_cert_even_when_default_allow():
+    if not os.getenv("PKCS11_TEST_MTLS"):
+        pytest.skip("mTLS not enabled")
+
+    pkcs11_lib = get_pkcs11_library_path()
+    softhsm_conf = _ensure_softhsm_conf()
+    mtls = _generate_mtls_materials_openssl()
+    proxy_socket = f"tls://127.0.0.1:{_get_free_port_safe()}"
+    port = int(proxy_socket.rsplit(":", 1)[1])
+    authz_path = os.path.join(mtls["temp_dir"], "authz.json")
+
+    policy = {"version": 1, "default": "allow", "clients": []}
+    with open(authz_path, "w") as f:
+        json.dump(policy, f)
+
+    daemon_env = {
+        **{**os.environ, "SOFTHSM2_CONF": softhsm_conf},
+        "PKCS11_DAEMON_SOCKET": proxy_socket,
+        "PKCS11_PROXY_TLS_MODE": "cert",
+        "PKCS11_PROXY_TLS_CERT_FILE": mtls["server_cert"],
+        "PKCS11_PROXY_TLS_KEY_FILE": mtls["server_key"],
+        "PKCS11_PROXY_TLS_CA_FILE": mtls["ca_cert"],
+        "PKCS11_PROXY_TLS_VERIFY_PEER": "false",
+        "PKCS11_PROXY_AUTHZ_MODE": "enforce",
+        "PKCS11_PROXY_AUTHZ_FILE": authz_path,
+        "PKCS11_PROXY_AUTHZ_DEFAULT": "allow",
+    }
+
+    log_path = os.path.join(mtls["temp_dir"], "daemon.log")
+    daemon_process, log_file = _start_daemon_with_logs(pkcs11_lib, daemon_env, log_path)
+    try:
+        _wait_for_daemon(daemon_process, log_path, proxy_socket)
+        _send_initialize_request_without_client_cert(port, mtls["ca_cert"])
     finally:
         _terminate_daemon(daemon_process)
         log_file.close()

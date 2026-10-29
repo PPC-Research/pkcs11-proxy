@@ -16,6 +16,7 @@ services:
       - NET_RAW
     networks:
       default:
+        ipv4_address: 172.30.1.2
         aliases:
           - pkcs11-server
     tty: true
@@ -28,10 +29,21 @@ services:
     privileged: true
     depends_on:
       - pkcs11-proxy-server
+    extra_hosts:
+      - "pkcs11-server:172.30.1.2"
     volumes:
       - ./certs:/etc/mtls:ro
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    networks:
+      default:
+        ipv4_address: 172.30.1.3
     tty: true
     stdin_open: true
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.1.0/24
